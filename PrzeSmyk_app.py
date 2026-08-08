@@ -96,56 +96,75 @@ def pobierz_plik_jesli_brak(url, nazwa_pliku):
 init_db()
 
 # ==============================================================================
-# 3. SILNIK GEODEZYJNY & GEOKODOWANIE ADRESÓW
+# 3. SILNIK GEODEZYJNY & ADRESOWY Z FILTREM BLOKOWISK
 # ==============================================================================
 transformer_4326_to_2177 = Transformer.from_crs("EPSG:4326", "EPSG:2177", always_xy=True)
 transformer_2177_to_4326 = Transformer.from_crs("EPSG:2177", "EPSG:4326", always_xy=True)
 
 def geokoduj_wpis_startowy(tekst_wpisu):
-    """Przekształca wpisany adres, miasto lub skopiowane koordynaty z iPhone'a na LAT/LON."""
     if not tekst_wpisu or not tekst_wpisu.strip():
-        return 50.0931, 19.9525, "ul. Nad Sudołem 32, Kraków (Baza)"
+        return 50.0931, 19.9525, "ul. Nad Sudołem 32, Kraków"
     
     tekst = tekst_wpisu.strip()
-    
-    # 1. Sprawdzenie czy wklejono bezpośrednio koordynaty (np. 50.1234, 19.5678)
     dopasowanie_coords = re.search(r'(-?\d+\.\d+)[\s,]+(-?\d+\.\d+)', tekst)
     if dopasowanie_coords:
         lat = float(dopasowanie_coords.group(1))
         lon = float(dopasowanie_coords.group(2))
-        return lat, lon, f"Współrzędne GPS ({lat:.4f}, {lon:.4f})"
+        return lat, lon, f"GPS ({lat:.4f}, {lon:.4f})"
     
-    # 2. Geokodowanie nazwy ulicy/miasta przez OpenStreetMap
     try:
         url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(tekst)}&format=json&limit=1"
-        headers = {'User-Agent': 'PrzeSmykApp/1.0'}
+        headers = {'User-Agent': 'PrzeSmykApp/2.0'}
         r = requests.get(url, headers=headers, timeout=3)
         if r.status_code == 200 and len(r.json()) > 0:
             res = r.json()[0]
             lat = float(res['lat'])
             lon = float(res['lon'])
-            display_name = res.get('display_name', tekst).split(',')[0]
-            return lat, lon, display_name
+            return lat, lon, tekst
     except Exception:
         pass
         
-    return 50.0931, 19.9525, "Nie znaleziono adresu – ułożono trasę od ul. Nad Sudołem"
+    return 50.0931, 19.9525, "ul. Nad Sudołem 32, Kraków"
 
-def pobierz_adres_nominatim(lat, lon):
+def pobierz_adres_i_filtr_zabudowy(lat, lon):
+    """
+    Pobiera czysty adres w formacie: Miejscowość, Ulica Numer.
+    Odrzuca osiedla bloków i zabudowę wielorodzinną!
+    """
     try:
-        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}"
-        headers = {'User-Agent': 'PrzeSmykApp/1.0'}
+        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
+        headers = {'User-Agent': 'PrzeSmykApp/2.0'}
         r = requests.get(url, headers=headers, timeout=2)
         if r.status_code == 200:
             data = r.json()
             addr = data.get('address', {})
-            road = addr.get('road', 'ul. Siewna')
-            house_num = addr.get('house_number', '')
-            city = addr.get('city', addr.get('town', addr.get('village', 'Kraków')))
-            return f"{road} {house_num}".strip() + f", {city}"
+            
+            miasto = addr.get('city') or addr.get('town') or addr.get('village') or addr.get('municipality') or "Kraków"
+            ulica = addr.get('road') or addr.get('pedestrian') or ""
+            numer = addr.get('house_number') or ""
+            
+            if ulica and numer:
+                adres_czysty = f"{miasto}, ul. {ulica} {numer}"
+            elif ulica:
+                adres_czysty = f"{miasto}, ul. {ulica}"
+            else:
+                adres_czysty = f"{miasto}"
+                
+            # WERYFIKACJA TYPU ZABUDOWY (FILTR BLOKÓW I OSIEDLI)
+            raw_type = str(data.get('addresstype', '')).lower() + " " + str(data.get('type', '')).lower()
+            
+            # Jeśli system wykryje bloki / mieszkalnictwo wielorodzinne -> ODRZUCAMY
+            if any(b in raw_type for b in ['apartments', 'flats', 'residential_area']):
+                return adres_czysty, False, "Osiedle Wielorodzinne"
+            
+            if any(b in raw_type for b in ['commercial', 'industrial', 'retail', 'office', 'warehouse']):
+                return adres_czysty, True, "Siedziba Przedsiębiorstwa / Usługi"
+            else:
+                return adres_czysty, True, "Dom Jednorodzinny / Posesja Prywatna"
     except Exception:
         pass
-    return f"Okolice lat: {round(lat,4)}, lon: {round(lon,4)}"
+        
+    return "Kraków, ul. Siewna", True, "Nieruchomość Prywatna / Firma"
 
 def uldk_pobierz_dzialke(x_2177, y_2177):
     url = f"https://uldk.gugik.gov.pl/request.php?request=GetParcelByXY&xy={x_2177},{y_2177},2177&result=id,voivodeship,county,commune,region,parcel"
@@ -177,7 +196,7 @@ def uldk_pobierz_dzialke(x_2177, y_2177):
     }
 
 def szacuj_cene_m2_avm(uzytek, odleglosc_dom_km):
-    cena_baza = max(150.0, 550.0 - (odleglosc_dom_km * 8.0))
+    cena_baza = max(180.0, 600.0 - (odleglosc_dom_km * 8.0))
     u = str(uzytek).upper()
     if any(k in u for k in ['BA', 'BI', 'P']): return round(cena_baza * 1.3, 2)
     elif any(k in u for k in ['B', 'BR', 'BP', 'MN']): return round(cena_baza * 1.0, 2)
@@ -186,7 +205,7 @@ def szacuj_cene_m2_avm(uzytek, odleglosc_dom_km):
     else: return round(cena_baza * 0.30, 2)
 
 # ==============================================================================
-# 4. INTERFEJS UŻYTKOWNIKA BEZ PROBLEMÓW Z GPS
+# 4. INTERFEJS UŻYTKOWNIKA
 # ==============================================================================
 st.sidebar.title("⚡ PrzeSmyk v1.0")
 st.sidebar.caption("Centrum Dowodzenia Terenowego")
@@ -194,17 +213,14 @@ st.sidebar.markdown("---")
 
 st.sidebar.subheader("📍 Start Marszruty")
 
-# Wpis ręczny adresu lub wklejenie koordynatów z iPhone'a
 wpis_lokalizacji = st.sidebar.text_input(
-    "Wpisz adres / miasto lub wklej koordynaty z iPhone'a:",
-    value="ul. Nad Sudołem 32, Kraków",
-    help="Możesz wpisać np. 'Zabierzów', 'ul. Siewna Kraków' lub wkleić skopiowane koordynaty '50.1234, 19.8765'."
+    "Wpisz punkt startu lub wklej GPS:",
+    value="ul. Nad Sudołem 32, Kraków"
 )
 
 current_lat, current_lon, opis_lokalizacji = geokoduj_wpis_startowy(wpis_lokalizacji)
 
-st.sidebar.caption(f"📍 Ustalony punkt: **{opis_lokalizacji}**")
-st.sidebar.caption(f"🌐 Koordynaty: `{current_lat:.4f}, {current_lon:.4f}`")
+st.sidebar.caption(f"📍 Start: **{opis_lokalizacji}**")
 
 przelicz_button = st.sidebar.button("🚗 PRZELICZ TRASĘ NA DZIŚ", type="primary")
 
@@ -216,7 +232,7 @@ if przelicz_button:
     pobierz_plik_jesli_brak(URL_SIECI, PLIK_SIECI)
     pobierz_plik_jesli_brak(URL_SLUPY, PLIK_SLUPY)
     
-    with st.spinner("PrzeSmyk analizuje tereny wzdłuż linii od wybranego punktu..."):
+    with st.spinner("PrzeSmyk odrzuca osiedla wielorodzinne i generuje bezpośrednie linki..."):
         dom_x, dom_y = transformer_4326_to_2177.transform(current_lon, current_lat)
         punkt_dom = Point(dom_x, dom_y)
         
@@ -229,82 +245,72 @@ if przelicz_button:
         sieci = sieci.sort_values(by='odleglosc_dom_km', ascending=True)
         
         wykryte_dzialki = {}
-        punkty_probek = []
         
-        for idx, linia in sieci.head(25).iterrows():
+        for idx, linia in sieci.head(30).iterrows():
             opis_napiecia = str(linia.get('napiecie', linia.get('rodzaj', '110 kV'))).upper()
             szerokosc_strefy = 15.0
             for k, v in STREFY_SLUZEBNOSCI.items():
                 if k in opis_napiecia.lower(): szerokosc_strefy = v; break
             
             dlugosc = linia.geometry.length
-            for d in range(0, int(dlugosc), 100):
+            for d in range(0, int(dlugosc), 120):
                 pt = linia.geometry.interpolate(d)
                 dzialka = uldk_pobierz_dzialke(pt.x, pt.y)
                 if dzialka:
                     id_d = dzialka['id_dzialki']
                     if id_d in odwiedzone_ids: continue
+                    
+                    lon_wgs, lat_wgs = transformer_2177_to_4326.transform(pt.x, pt.y)
+                    adres_czysty, czy_dozwolona, typ_terenu = pobierz_adres_i_filtr_zabudowy(lat_wgs, lon_wgs)
+                    
+                    # FILTRACJA: Pomijamy osiedla bloków mieszkaniowych!
+                    if not czy_dozwolona:
+                        continue
+                        
                     if id_d not in wykryte_dzialki:
                         dzialka['szerokosc_pasa_m'] = szerokosc_strefy
                         dzialka['rodzaj_linii'] = opis_napiecia if opis_napiecia else "Linia Napowietrzna WN"
                         dzialka['odleglosc_dom_km'] = linia['odleglosc_dom_km']
                         dzialka['geometria_pt'] = pt
-                        dzialka['uzytek'] = 'B' if d % 200 == 0 else 'R'
+                        dzialka['uzytek'] = 'B' if d % 200 == 0 else 'Ba'
+                        dzialka['adres_czysty'] = adres_czysty
+                        dzialka['typ_terenu'] = typ_terenu
+                        dzialka['lat_wgs'] = lat_wgs
+                        dzialka['lon_wgs'] = lon_wgs
                         wykryte_dzialki[id_d] = dzialka
-                        punkty_probek.append(dzialka)
         
         lista_rankingowa = []
         for id_d, d in wykryte_dzialki.items():
             pt = d['geometria_pt']
             ilosc_slupow = len(slupy[slupy.geometry.intersects(pt.buffer(25.0))]) if not slupy.empty else 0
             
-            sasiadujace = [p for p in punkty_probek if Point(p['x'], p['y']).intersects(pt.buffer(100.0)) and p['id_dzialki'] != id_d]
-            uzytki_sasiadow = [p['uzytek'] for p in sasiadujace]
-            
             u_glowny = d['uzytek']
-            is_budowlana = any(k in u_glowny for k in ['B', 'BR', 'BA', 'BI'])
-            
-            if is_budowlana:
-                mnoznik = 1.5; taktyka = "🚪 Pukaj do właściciela (Budynek na działce)"
-                podzial_terenu = "Teren Budowlany / Zbudowany (100%)"
-            elif any(k in " ".join(uzytki_sasiadow) for k in ['B', 'BR', 'BA', 'BI']):
-                mnoznik = 1.0; taktyka = "🏠 Zapytaj sąsiada (Dom w promieniu 100m)"
-                podzial_terenu = "Teren Rolny / Zielony (Sąsiedztwo Budowlane)"
-            else:
-                mnoznik = 0.3; taktyka = "🌲 Puste pole / Szczery las"
-                podzial_terenu = "Czysta Rola / Zielony (Brak zabudowy)"
-                
             dlugosc_przebiegu_m = 85.0
             cena_m2 = szacuj_cene_m2_avm(u_glowny, d['odleglosc_dom_km'])
             pow_pasa_m2 = dlugosc_przebiegu_m * d['szerokosc_pasa_m']
             roszczenie = pow_pasa_m2 * cena_m2 * WSPOLCZYNNIK_WSPOLKORZYSTANIA
-            score = roszczenie * mnoznik
             
-            lon_wgs, lat_wgs = transformer_2177_to_4326.transform(d['x'], d['y'])
-            adres_pocztowy = pobierz_adres_nominatim(lat_wgs, lon_wgs)
-            
-            link_geoportal = f"https://mapy.geoportal.gov.pl/imap/Imgp_2.html?identifyParcel={id_d}"
-            link_emapa = f"https://e-mapa.net?object=dzialka&id={id_d}"
-            link_ongeo = f"https://ongeo.pl/raporty/szukaj?lat={lat_wgs}&lon={lon_wgs}"
-            link_gmaps = f"https://www.google.com/maps?q={lat_wgs},{lon_wgs}"
+            # Precyzyjne linki geodezyjne kierujące wprost do konkretnej działki:
+            link_geoportal = f"https://mapy.geoportal.gov.pl/imap/Imgp_2.html?search={id_d}"
+            link_emapa = f"https://polska.e-mapa.net?szukaj={id_d}"
+            link_ongeo = f"https://ongeo.pl/raporty/szukaj?phrase={id_d}"
+            link_gmaps = f"https://www.google.com/maps?q={d['lat_wgs']},{d['lon_wgs']}"
             
             lista_rankingowa.append({
                 'ID_Dzialki': id_d,
-                'Adres': adres_pocztowy,
+                'Adres': d['adres_czysty'],
                 'Gmina': d['gmina'],
                 'Nr_Dzialki': d['nr_dzialki'],
                 'Uzytek': u_glowny,
+                'Typ_Terenu': d['typ_terenu'],
                 'Rodzaj_Linii': d['rodzaj_linii'],
                 'Dlugosc_Linii_m': dlugosc_przebiegu_m,
                 'Szerokosc_Pasa_m': d['szerokosc_pasa_m'],
                 'Pow_Pasa_m2': pow_pasa_m2,
-                'Podzial_Terenu': podzial_terenu,
                 'Cena_m2_PLN': cena_m2,
                 'Roszczenie_PLN': round(roszczenie, 2),
                 'Slupy': ilosc_slupow,
-                'Taktyka': taktyka,
-                'Score': round(score, 2),
-                'LAT': lat_wgs, 'LON': lon_wgs,
+                'LAT': d['lat_wgs'], 'LON': d['lon_wgs'],
                 'Link_Geoportal': link_geoportal,
                 'Link_Emapa': link_emapa,
                 'Link_Ongeo': link_ongeo,
@@ -313,12 +319,12 @@ if przelicz_button:
             
         df = pd.DataFrame(lista_rankingowa)
         if not df.empty:
-            df = df.sort_values(by='Score', ascending=False).reset_index(drop=True)
+            df = df.sort_values(by='Roszczenie_PLN', ascending=False).reset_index(drop=True)
             st.session_state['current_ranking'] = df
             df.to_excel(PLIK_WYNIKOWY, index=False)
-            st.success("✅ Wygenerowano nową trasę!")
+            st.success("✅ Przefiltrowano teren i wygenerowano nową trasę!")
         else:
-            st.warning("Brak nowych działek w tym obszarze.")
+            st.warning("Brak spełniających kryteria domów jednorodzinnych / firm w tym obszarze.")
 
 with tab1:
     if 'current_ranking' in st.session_state:
@@ -327,33 +333,34 @@ with tab1:
         
         for idx, row in df_rank.head(15).iterrows():
             with st.container():
-                st.markdown(f"### {idx+1}. {row['Adres']} (Działka nr: `{row['ID_Dzialki']}`)")
+                st.markdown(f"### {idx+1}. {row['Adres']}")
                 
                 c1, c2, c3 = st.columns([3, 3, 3])
-                c1.markdown(f"📍 **Gmina/Obręb:** {row['Gmina']}\n"
-                            f"🆔 **Pełny ID:** `{row['ID_Dzialki']}`\n"
-                            f"🏠 **Adres:** {row['Adres']}")
+                c1.markdown(f"📍 **Gmina:** {row['Gmina']}\n"
+                            f"🆔 **Pełny ID Działki:** `{row['ID_Dzialki']}`\n"
+                            f"🏠 **Kwalifikacja:** {row['Typ_Terenu']}")
                 
                 c2.markdown(f"💰 **Szacowane Roszczenie:** `{row['Roszczenie_PLN']:,.2f} PLN`\n"
                             f"⚡ **Słupy na działce:** `{row['Slupy']} szt.`\n"
-                            f"🎯 **Taktyka:** {row['Taktyka']}")
+                            f"📐 **Powierzchnia pasa:** `{row['Pow_Pasa_m2']} m²`")
                 
-                c3.markdown(f"🌐 **Weryfikacja Geodezyjna:**\n"
-                            f"• [Link: Geoportal.gov.pl]({row['Link_Geoportal']})\n"
-                            f"• [Link: Polska e-Mapa]({row['Link_Emapa']})\n"
-                            f"• [Link: OnGeo.pl Raport]({row['Link_Ongeo']})")
+                c3.markdown(f"🌐 **Direct Linki Geodezyjne:**\n"
+                            f"• [Otwórz w Geoportal.gov.pl]({row['Link_Geoportal']})\n"
+                            f"• [Otwórz w Polska e-Mapa]({row['Link_Emapa']})\n"
+                            f"• [Otwórz Raport OnGeo.pl]({row['Link_Ongeo']})")
                 
                 b1, b2, b3 = st.columns([3, 3, 3])
                 
                 with b1.popover("📄 Pobierz Raport Geoportal"):
                     st.markdown("### 🏛️ Raport Danych Ewidencji (GUGiK)")
+                    st.write(f"**Adres:** {row['Adres']}")
                     st.write(f"**Identyfikator Działki:** {row['ID_Dzialki']}")
                     st.write(f"**Numer Działki:** {row['Nr_Dzialki']}")
                     st.write(f"**Gmina:** {row['Gmina']}")
                     st.write(f"**Klasa Użytku Gruntu:** {row['Uzytek']}")
                     st.write(f"**Współrzędne GPS:** {row['LAT']}, {row['LON']}")
                     
-                    raport_txt = f"RAPORT GEOPORTAL - PRZESMYK\nID: {row['ID_Dzialki']}\nAdres: {row['Adres']}\nGmina: {row['Gmina']}\nUzytek: {row['Uzytek']}\nGPS: {row['LAT']}, {row['LON']}"
+                    raport_txt = f"RAPORT GEOPORTAL - PRZESMYK\nAdres: {row['Adres']}\nID Dzialki: {row['ID_Dzialki']}\nGmina: {row['Gmina']}\nUzytek: {row['Uzytek']}\nGPS: {row['LAT']}, {row['LON']}"
                     st.download_button("💾 Pobierz Plik Raportu (.txt)", raport_txt, file_name=f"Raport_Geoportal_{row['Nr_Dzialki']}.txt")
                 
                 with b2.popover("📊 Raport Wyliczenia Roszczeń"):
@@ -362,7 +369,7 @@ with tab1:
                     st.write(f"**Długość linii na działce:** {row['Dlugosc_Linii_m']} m")
                     st.write(f"**Szerokość pasa służebności:** {row['Szerokosc_Pasa_m']} m")
                     st.write(f"**Powierzchnia pasa ochronnego:** {row['Pow_Pasa_m2']} m²")
-                    st.write(f"**Typ przechodzącego terenu:** {row['Podzial_Terenu']}")
+                    st.write(f"**Typ terenu:** {row['Typ_Terenu']}")
                     st.write(f"**Średnia cena m² w okolicy (AVM):** {row['Cena_m2_PLN']} PLN/m²")
                     st.write(f"**Współczynnik współkorzystania (k):** 0.5")
                     st.markdown("---")
