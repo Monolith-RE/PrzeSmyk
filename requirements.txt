@@ -1,0 +1,7 @@
+streamlit
+geopandas
+pandas
+requests
+openpyxl
+pyproj
+shapely
