@@ -16,12 +16,13 @@ import time
 DB_NAME = "PrzeSmyk_crm.db"
 PLIK_SIECI = "sieci_komplet.gpkg"
 PLIK_SLUPY = "slupy_komplet.gpkg"
+PLIK_WYNIKOWY = "PrzeSmyk_Ranking.xlsx"
 
 URL_SIECI = "https://github.com/Monolith-RE/PrzeSmyk/releases/download/v1.0/sieci_komplet.gpkg"
 URL_SLUPY = "https://github.com/Monolith-RE/PrzeSmyk/releases/download/v1.0/slupy_komplet.gpkg"
 
 st.set_page_config(
-    page_title="PrzeSmyk - Raporty i Służebność",
+    page_title="PrzeSmyk",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -34,7 +35,7 @@ STREFY_SLUZEBNOSCI = {
 WSPOLCZYNNIK_WSPOLKORZYSTANIA = 0.5
 
 # ==============================================================================
-# BAZA DANYCH CRM
+# 2. BAZA DANYCH CRM & PAMIĘĆ OSTATNIEJ TRASY
 # ==============================================================================
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -95,13 +96,12 @@ def pobierz_plik_jesli_brak(url, nazwa_pliku):
 init_db()
 
 # ==============================================================================
-# SILNIK GEODEZYJNY & REVERSE GEOCODING
+# 3. SILNIK GEODEZYJNY & REVERSE GEOCODING
 # ==============================================================================
 transformer_4326_to_2177 = Transformer.from_crs("EPSG:4326", "EPSG:2177", always_xy=True)
 transformer_2177_to_4326 = Transformer.from_crs("EPSG:2177", "EPSG:4326", always_xy=True)
 
 def pobierz_adres_nominatim(lat, lon):
-    """Pobiera dokładny adres pocztowy/ulicę z OpenStreetMap."""
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}"
         headers = {'User-Agent': 'PrzeSmykApp/1.0'}
@@ -118,7 +118,6 @@ def pobierz_adres_nominatim(lat, lon):
     return f"Okolice lat: {round(lat,4)}, lon: {round(lon,4)}"
 
 def uldk_pobierz_dzialke(x_2177, y_2177):
-    """Pobiera pełny numer identyfikacyjny działki z GUGiK ULDK."""
     url = f"https://uldk.gugik.gov.pl/request.php?request=GetParcelByXY&xy={x_2177},{y_2177},2177&result=id,voivodeship,county,commune,region,parcel"
     try:
         resp = requests.get(url, timeout=2)
@@ -157,7 +156,7 @@ def szacuj_cene_m2_avm(uzytek, odleglosc_dom_km):
     else: return round(cena_baza * 0.30, 2)
 
 # ==============================================================================
-# INTERFEJS UŻYTKOWNIKA
+# 4. INTERFEJS UŻYTKOWNIKA
 # ==============================================================================
 st.sidebar.title("⚡ PrzeSmyk v1.0")
 st.sidebar.caption("Centrum Dowodzenia Terenowego")
@@ -245,7 +244,7 @@ if przelicz_button:
                 mnoznik = 0.3; taktyka = "🌲 Puste pole / Szczery las"
                 podzial_terenu = "Czysta Rola / Zielony (Brak zabudowy)"
                 
-            dlugosc_przebiegu_m = 85.0  # Długość przęsła linii na działce
+            dlugosc_przebiegu_m = 85.0
             cena_m2 = szacuj_cene_m2_avm(u_glowny, d['odleglosc_dom_km'])
             pow_pasa_m2 = dlugosc_przebiegu_m * d['szerokosc_pasa_m']
             roszczenie = pow_pasa_m2 * cena_m2 * WSPOLCZYNNIK_WSPOLKORZYSTANIA
@@ -254,7 +253,6 @@ if przelicz_button:
             lon_wgs, lat_wgs = transformer_2177_to_4326.transform(d['x'], d['y'])
             adres_pocztowy = pobierz_adres_nominatim(lat_wgs, lon_wgs)
             
-            # Generowanie bezpośrednich linków do portali geodezyjnych
             link_geoportal = f"https://mapy.geoportal.gov.pl/imap/Imgp_2.html?identifyParcel={id_d}"
             link_emapa = f"https://e-mapa.net?object=dzialka&id={id_d}"
             link_ongeo = f"https://ongeo.pl/raporty/szukaj?lat={lat_wgs}&lon={lon_wgs}"
@@ -308,16 +306,13 @@ with tab1:
                             f"⚡ **Słupy na działce:** `{row['Slupy']} szt.`\n"
                             f"🎯 **Taktyka:** {row['Taktyka']}")
                 
-                # Zespół linków weryfikacyjnych
                 c3.markdown(f"🌐 **Weryfikacja Geodezyjna:**\n"
                             f"• [Link: Geoportal.gov.pl]({row['Link_Geoportal']})\n"
                             f"• [Link: Polska e-Mapa]({row['Link_Emapa']})\n"
                             f"• [Link: OnGeo.pl Raport]({row['Link_Ongeo']})")
                 
-                # PRZYCISKI RAPORTÓW I NAWIGACJI
                 b1, b2, b3 = st.columns([3, 3, 3])
                 
-                # 1. RAPORT GEOPORTAL
                 with b1.popover("📄 Pobierz Raport Geoportal"):
                     st.markdown("### 🏛️ Raport Danych Ewidencji (GUGiK)")
                     st.write(f"**Identyfikator Działki:** {row['ID_Dzialki']}")
@@ -329,7 +324,6 @@ with tab1:
                     raport_txt = f"RAPORT GEOPORTAL - PRZESMYK\nID: {row['ID_Dzialki']}\nAdres: {row['Adres']}\nGmina: {row['Gmina']}\nUzytek: {row['Uzytek']}\nGPS: {row['LAT']}, {row['LON']}"
                     st.download_button("💾 Pobierz Plik Raportu (.txt)", raport_txt, file_name=f"Raport_Geoportal_{row['Nr_Dzialki']}.txt")
                 
-                # 2. RAPORT WYLICZENIA ROSZCZEŃ
                 with b2.popover("📊 Raport Wyliczenia Roszczeń"):
                     st.markdown("### 💰 Kalkulator Służebności Przesyłu")
                     st.write(f"**Rodzaj linii przesyłowej:** {row['Rodzaj_Linii']}")
@@ -343,7 +337,6 @@ with tab1:
                     st.markdown(f"**Wzór:** `Powierzchnia Pasa ({row['Pow_Pasa_m2']} m²) × Cena m² ({row['Cena_m2_PLN']} PLN) × 0.5`")
                     st.markdown(f"### Wartość Roszczenia: **{row['Roszczenie_PLN']:,.2f} PLN**")
                 
-                # 3. NAWIGACJA
                 b3.link_button("🚗 Nawiguj (Google Maps)", row['Link_Gmaps'], type="primary")
                 st.markdown("---")
     else:
