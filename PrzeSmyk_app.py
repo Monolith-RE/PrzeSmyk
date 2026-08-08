@@ -35,7 +35,7 @@ STREFY_SLUZEBNOSCI = {
 WSPOLCZYNNIK_WSPOLKORZYSTANIA = 0.5
 
 # ==============================================================================
-# 2. BAZA DANYCH CRM & PAMIĘĆ OSTATNIEJ TRASY
+# 2. BAZA DANYCH CRM
 # ==============================================================================
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -156,7 +156,7 @@ def szacuj_cene_m2_avm(uzytek, odleglosc_dom_km):
     else: return round(cena_baza * 0.30, 2)
 
 # ==============================================================================
-# 4. INTERFEJS UŻYTKOWNIKA
+# 4. INTERFEJS UŻYTKOWNIKA I AUTOMATYCZNY GPS
 # ==============================================================================
 st.sidebar.title("⚡ PrzeSmyk v1.0")
 st.sidebar.caption("Centrum Dowodzenia Terenowego")
@@ -164,17 +164,24 @@ st.sidebar.markdown("---")
 
 st.sidebar.subheader("📍 Start Marszruty")
 
+# Odczytujemy geolokalizację z przeglądarki iPada
 loc = get_geolocation()
-if loc and 'coords' in loc:
-    default_lat = float(loc['coords']['latitude'])
-    default_lon = float(loc['coords']['longitude'])
-    st.sidebar.success("📍 Pobrano GPS z iPada!")
-else:
-    default_lat = 50.0931
-    default_lon = 19.9525
 
-current_lat = st.sidebar.number_input("Szerokość (LAT)", value=default_lat, format="%.4f")
-current_lon = st.sidebar.number_input("Długość (LON)", value=default_lon, format="%.4f")
+if loc and 'coords' in loc:
+    st.session_state['gps_lat'] = float(loc['coords']['latitude'])
+    st.session_state['gps_lon'] = float(loc['coords']['longitude'])
+
+# Pobieramy najświeższe dane z session_state
+lat_val = st.session_state.get('gps_lat', 50.0931)
+lon_val = st.session_state.get('gps_lon', 19.9525)
+
+if 'gps_lat' in st.session_state:
+    st.sidebar.success(f"📍 GPS Aktywny: {lat_val:.4f}, {lon_val:.4f}")
+else:
+    st.sidebar.info("⏳ Czekam na sygnał GPS z iPada...")
+
+current_lat = st.sidebar.number_input("Szerokość (LAT)", value=lat_val, format="%.4f")
+current_lon = st.sidebar.number_input("Długość (LON)", value=lon_val, format="%.4f")
 
 przelicz_button = st.sidebar.button("🚗 PRZELICZ TRASĘ NA DZIŚ", type="primary")
 
