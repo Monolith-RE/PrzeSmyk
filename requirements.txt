@@ -5,3 +5,4 @@ requests
 openpyxl
 pyproj
 shapely
+streamlit-js-eval
