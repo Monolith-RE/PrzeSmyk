@@ -4,10 +4,10 @@ import pandas as pd
 import requests
 import sqlite3
 import os
+import re
 from datetime import datetime
 from shapely.geometry import Point
 from pyproj import Transformer
-from streamlit_js_eval import get_geolocation
 import time
 
 # ==============================================================================
@@ -96,10 +96,40 @@ def pobierz_plik_jesli_brak(url, nazwa_pliku):
 init_db()
 
 # ==============================================================================
-# 3. SILNIK GEODEZYJNY & REVERSE GEOCODING
+# 3. SILNIK GEODEZYJNY & GEOKODOWANIE ADRESÓW
 # ==============================================================================
 transformer_4326_to_2177 = Transformer.from_crs("EPSG:4326", "EPSG:2177", always_xy=True)
 transformer_2177_to_4326 = Transformer.from_crs("EPSG:2177", "EPSG:4326", always_xy=True)
+
+def geokoduj_wpis_startowy(tekst_wpisu):
+    """Przekształca wpisany adres, miasto lub skopiowane koordynaty z iPhone'a na LAT/LON."""
+    if not tekst_wpisu or not tekst_wpisu.strip():
+        return 50.0931, 19.9525, "ul. Nad Sudołem 32, Kraków (Baza)"
+    
+    tekst = tekst_wpisu.strip()
+    
+    # 1. Sprawdzenie czy wklejono bezpośrednio koordynaty (np. 50.1234, 19.5678)
+    dopasowanie_coords = re.search(r'(-?\d+\.\d+)[\s,]+(-?\d+\.\d+)', tekst)
+    if dopasowanie_coords:
+        lat = float(dopasowanie_coords.group(1))
+        lon = float(dopasowanie_coords.group(2))
+        return lat, lon, f"Współrzędne GPS ({lat:.4f}, {lon:.4f})"
+    
+    # 2. Geokodowanie nazwy ulicy/miasta przez OpenStreetMap
+    try:
+        url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(tekst)}&format=json&limit=1"
+        headers = {'User-Agent': 'PrzeSmykApp/1.0'}
+        r = requests.get(url, headers=headers, timeout=3)
+        if r.status_code == 200 and len(r.json()) > 0:
+            res = r.json()[0]
+            lat = float(res['lat'])
+            lon = float(res['lon'])
+            display_name = res.get('display_name', tekst).split(',')[0]
+            return lat, lon, display_name
+    except Exception:
+        pass
+        
+    return 50.0931, 19.9525, "Nie znaleziono adresu – ułożono trasę od ul. Nad Sudołem"
 
 def pobierz_adres_nominatim(lat, lon):
     try:
@@ -156,7 +186,7 @@ def szacuj_cene_m2_avm(uzytek, odleglosc_dom_km):
     else: return round(cena_baza * 0.30, 2)
 
 # ==============================================================================
-# 4. INTERFEJS UŻYTKOWNIKA I AUTOMATYCZNY GPS
+# 4. INTERFEJS UŻYTKOWNIKA BEZ PROBLEMÓW Z GPS
 # ==============================================================================
 st.sidebar.title("⚡ PrzeSmyk v1.0")
 st.sidebar.caption("Centrum Dowodzenia Terenowego")
@@ -164,24 +194,17 @@ st.sidebar.markdown("---")
 
 st.sidebar.subheader("📍 Start Marszruty")
 
-# Odczytujemy geolokalizację z przeglądarki iPada
-loc = get_geolocation()
+# Wpis ręczny adresu lub wklejenie koordynatów z iPhone'a
+wpis_lokalizacji = st.sidebar.text_input(
+    "Wpisz adres / miasto lub wklej koordynaty z iPhone'a:",
+    value="ul. Nad Sudołem 32, Kraków",
+    help="Możesz wpisać np. 'Zabierzów', 'ul. Siewna Kraków' lub wkleić skopiowane koordynaty '50.1234, 19.8765'."
+)
 
-if loc and 'coords' in loc:
-    st.session_state['gps_lat'] = float(loc['coords']['latitude'])
-    st.session_state['gps_lon'] = float(loc['coords']['longitude'])
+current_lat, current_lon, opis_lokalizacji = geokoduj_wpis_startowy(wpis_lokalizacji)
 
-# Pobieramy najświeższe dane z session_state
-lat_val = st.session_state.get('gps_lat', 50.0931)
-lon_val = st.session_state.get('gps_lon', 19.9525)
-
-if 'gps_lat' in st.session_state:
-    st.sidebar.success(f"📍 GPS Aktywny: {lat_val:.4f}, {lon_val:.4f}")
-else:
-    st.sidebar.info("⏳ Czekam na sygnał GPS z iPada...")
-
-current_lat = st.sidebar.number_input("Szerokość (LAT)", value=lat_val, format="%.4f")
-current_lon = st.sidebar.number_input("Długość (LON)", value=lon_val, format="%.4f")
+st.sidebar.caption(f"📍 Ustalony punkt: **{opis_lokalizacji}**")
+st.sidebar.caption(f"🌐 Koordynaty: `{current_lat:.4f}, {current_lon:.4f}`")
 
 przelicz_button = st.sidebar.button("🚗 PRZELICZ TRASĘ NA DZIŚ", type="primary")
 
@@ -193,7 +216,7 @@ if przelicz_button:
     pobierz_plik_jesli_brak(URL_SIECI, PLIK_SIECI)
     pobierz_plik_jesli_brak(URL_SLUPY, PLIK_SLUPY)
     
-    with st.spinner("PrzeSmyk pobiera adresy budowlane, numery KW/działek oraz przelicza roszczenia..."):
+    with st.spinner("PrzeSmyk analizuje tereny wzdłuż linii od wybranego punktu..."):
         dom_x, dom_y = transformer_4326_to_2177.transform(current_lon, current_lat)
         punkt_dom = Point(dom_x, dom_y)
         
@@ -293,7 +316,9 @@ if przelicz_button:
             df = df.sort_values(by='Score', ascending=False).reset_index(drop=True)
             st.session_state['current_ranking'] = df
             df.to_excel(PLIK_WYNIKOWY, index=False)
-            st.success("✅ Wygenerowano pełne raporty geodezyjne i roszczeniowe!")
+            st.success("✅ Wygenerowano nową trasę!")
+        else:
+            st.warning("Brak nowych działek w tym obszarze.")
 
 with tab1:
     if 'current_ranking' in st.session_state:
