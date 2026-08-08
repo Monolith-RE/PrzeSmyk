@@ -35,19 +35,7 @@ STREFY_SLUZEBNOSCI = {
 WSPOLCZYNNIK_WSPOLKORZYSTANIA = 0.5
 
 # ==============================================================================
-# POBIERANIE PLIKÓW Z RELEASES
-# ==============================================================================
-def pobierz_plik_jesli_brak(url, nazwa_pliku):
-    if not os.path.exists(nazwa_pliku):
-        with st.spinner(f"Pobieranie {nazwa_pliku}..."):
-            r = requests.get(url, stream=True)
-            if r.status_code == 200:
-                with open(nazwa_pliku, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=1024*1024):
-                        if chunk: f.write(chunk)
-
-# ==============================================================================
-# BAZA DANYCH CRM
+# BAZA DANYCH CRM & PAMIĘĆ OSTATNIEJ TRASY
 # ==============================================================================
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -62,8 +50,42 @@ def init_db():
             data_aktualizacji TEXT
         )
     ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS ostatnia_trasa (
+            id_dzialki TEXT PRIMARY KEY,
+            gmina TEXT,
+            roszczenie_pln REAL,
+            slupy INTEGER,
+            taktyka TEXT,
+            score REAL,
+            lat REAL,
+            lon REAL,
+            google_maps TEXT
+        )
+    ''')
     conn.commit()
     conn.close()
+
+def save_last_route(df):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute("DELETE FROM ostatnia_trasa")
+    for idx, row in df.iterrows():
+        c.execute('''
+            INSERT INTO ostatnia_trasa VALUES (?,?,?,?,?,?,?,?,?)
+        ''', (row['ID_Dzialki'], row['Gmina'], row['Roszczenie_PLN'], row['Slupy'], row['Taktyka'], row['Score'], row['LAT'], row['LON'], row['Google_Maps']))
+    conn.commit()
+    conn.close()
+
+def load_last_route():
+    conn = sqlite3.connect(DB_NAME)
+    try:
+        df = pd.read_sql_query("SELECT * FROM ostatnia_trasa ORDER BY score DESC", conn)
+        conn.close()
+        return df
+    except Exception:
+        conn.close()
+        return pd.DataFrame()
 
 def save_crm_record(id_dzialki, status, nr_kw, wlasciciel, notatka):
     conn = sqlite3.connect(DB_NAME)
@@ -96,10 +118,19 @@ def get_all_crm_records():
     conn.close()
     return df
 
+def pobierz_plik_jesli_brak(url, nazwa_pliku):
+    if not os.path.exists(nazwa_pliku):
+        with st.spinner(f"Pobieranie {nazwa_pliku}..."):
+            r = requests.get(url, stream=True)
+            if r.status_code == 200:
+                with open(nazwa_pliku, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=1024*1024):
+                        if chunk: f.write(chunk)
+
 init_db()
 
 # ==============================================================================
-# SILNIK GIS Z AUTOMATYCZNYM FALLBACKIEM
+# SILNIK GIS
 # ==============================================================================
 transformer_4326_to_2177 = Transformer.from_crs("EPSG:4326", "EPSG:2177", always_xy=True)
 transformer_2177_to_4326 = Transformer.from_crs("EPSG:2177", "EPSG:4326", always_xy=True)
@@ -119,14 +150,11 @@ def uldk_pobierz_dzialke(x_2177, y_2177):
     except Exception:
         pass
     
-    # Fallback na wypadek blokady API GUGiK ze strony serwerów chmury
     lon_w, lat_w = transformer_2177_to_4326.transform(x_2177, y_2177)
     return {
         'id_dzialki': f"PUNKT_{int(x_2177)}_{int(y_2177)}",
-        'wojewodztwo': "Małopolskie",
-        'powiat': "Krakowski",
-        'gmina': "Obszar Terenowy",
-        'obreb': "Ewidencja",
+        'wojewodztwo': "Małopolskie", 'powiat': "Krakowski",
+        'gmina': "Obszar Terenowy", 'obreb': "Ewidencja",
         'nr_dzialki': f"{int(x_2177 % 1000)}/{int(y_2177 % 1000)}",
         'x': x_2177, 'y': y_2177
     }
@@ -149,7 +177,6 @@ st.sidebar.markdown("---")
 
 st.sidebar.subheader("📍 Start Marszruty")
 
-# Pobieranie geolokalizacji z iPada
 loc = get_geolocation()
 if loc and 'coords' in loc:
     default_lat = float(loc['coords']['latitude'])
@@ -244,16 +271,20 @@ if przelicz_button:
         if not df.empty:
             df = df.sort_values(by='Score', ascending=False).reset_index(drop=True)
             st.session_state['current_ranking'] = df
-            df.to_excel(PLIK_WYNIKOWY, index=False)
-            st.success("✅ Wygenerowano nowy ranking i trasę!")
+            save_last_route(df)  # <--- TRWAŁY ZAPIS TRASY W BAZIE!
+            st.success("✅ Wygenerowano nową trasę i zapisano w pamięci trwałej!")
         else:
             st.warning("Brak nowych działek w tym obszarze.")
 
 with tab1:
-    if 'current_ranking' in st.session_state:
-        df_rank = st.session_state['current_ranking']
-        st.subheader("📍 TOP Działki do Odwiedzenia")
+    # Wczytujemy z pamięci podręcznej LUB z bazy danych po odświeżeniu
+    if 'current_ranking' not in st.session_state:
+        st.session_state['current_ranking'] = load_last_route()
         
+    df_rank = st.session_state['current_ranking']
+    
+    if not df_rank.empty:
+        st.subheader("📍 TOP Działki do Odwiedzenia")
         for idx, row in df_rank.head(15).iterrows():
             with st.container():
                 c1, c2, c3, c4 = st.columns([2, 2, 2, 2])
