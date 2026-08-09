@@ -7,6 +7,7 @@ import os
 import re
 from datetime import datetime
 from shapely.geometry import Point
+from shapely.wkt import loads as wkt_loads
 from pyproj import Transformer
 import time
 
@@ -21,15 +22,15 @@ PLIK_WYNIKOWY = "PrzeSmyk_Ranking.xlsx"
 URL_SIECI = "https://github.com/Monolith-RE/PrzeSmyk/releases/download/v1.0/sieci_komplet.gpkg"
 URL_SLUPY = "https://github.com/Monolith-RE/PrzeSmyk/releases/download/v1.0/slupy_komplet.gpkg"
 
-st.set_page_config(page_title="PrzeSmyk", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="PrzeSmyk: Sprytny Planer Służebności Przesyłu", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
 STREFY_SLUZEBNOSCI = {'400kv': 30.0, '220kv': 25.0, '110kv': 20.0, 'wysokie': 20.0, 'najwyższe': 30.0, 'domyslna': 15.0}
 WSPOLCZYNNIK_WSPOLKORZYSTANIA = 0.5
 
-CZARNA_LISTA = ['osiedle', 'os.', 'blok', 'bloki', 'apartament', 'apartments', 'flats', 'residential', 'wielorodzinny', 'spółdzielnia']
+CZARNA_LISTA = ['osiedle', 'os.', 'blok', 'bloki', 'apartament', 'apartments', 'flats', 'wielorodzinny', 'spółdzielnia']
 
 # ==============================================================================
-# 2. CRM BAZA
+# 2. CRM BAZA DANYCH
 # ==============================================================================
 def init_db():
     conn = sqlite3.connect(DB_NAME); c = conn.cursor()
@@ -46,7 +47,6 @@ def get_visited_ids():
     c.execute("SELECT id_dzialki FROM historia_dzialek WHERE status IN ('Odwiedzona', 'Finalizacja', 'Odmowa')")
     rows = c.fetchall(); conn.close(); return [r[0] for r in rows]
 
-# Przywrócona funkcja pobierająca rekordy!
 def get_all_crm_records():
     conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query("SELECT * FROM historia_dzialek ORDER BY data_aktualizacji DESC", conn)
@@ -64,7 +64,7 @@ def pobierz_plik_jesli_brak(url, nazwa_pliku):
 init_db()
 
 # ==============================================================================
-# 3. SILNIK GIS, GEOKODOWANIE I FILTRY
+# 3. SILNIK GIS Z SKANOWANIEM DYNAMICZNYM DLA 7 POWIATÓW
 # ==============================================================================
 transformer_4326_to_2177 = Transformer.from_crs("EPSG:4326", "EPSG:2177", always_xy=True)
 transformer_2177_to_4326 = Transformer.from_crs("EPSG:2177", "EPSG:4326", always_xy=True)
@@ -76,16 +76,17 @@ def geokoduj_wpis_startowy(tekst_wpisu):
     if match: return float(match.group(1)), float(match.group(2)), f"GPS ({float(match.group(1)):.4f}, {float(match.group(2)):.4f})"
     try:
         url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(tekst)}&format=json&limit=1"
-        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/5.0'}, timeout=3)
+        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/7.0'}, timeout=3)
         if r.status_code == 200 and len(r.json()) > 0:
-            return float(r.json()[0]['lat']), float(r.json()[0]['lon']), r.json()[0].get('display_name', tekst).split(',')[0]
-    except: pass
-    return 50.0931, 19.9525, "Brak adresu w bazie (Domyślnie Kraków)"
+            res = r.json()[0]
+            return float(res['lat']), float(res['lon']), res.get('display_name', tekst).split(',')[0]
+    except Exception: pass
+    return 50.0931, 19.9525, "Kraków (Domyślnie)"
 
 def pobierz_adres_i_filtr_zabudowy(lat, lon, nr_dzialki_ewidencja):
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1&extratags=1"
-        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/5.0'}, timeout=2)
+        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/7.0'}, timeout=2)
         if r.status_code == 200:
             data = r.json()
             raw_text = str(data).lower()
@@ -104,17 +105,24 @@ def pobierz_adres_i_filtr_zabudowy(lat, lon, nr_dzialki_ewidencja):
             if any(b in raw_text for b in ['commercial', 'industrial', 'warehouse', 'company']):
                 return adres_czysty, True, "Firma / Przemysł"
             return adres_czysty, True, "Dom Jednorodzinny / Posesja"
-    except: pass
+    except Exception: pass
     return f"Kraków, dz. nr {nr_dzialki_ewidencja}", True, "Posesja"
 
-def uldk_pobierz_dzialke(x_2177, y_2177):
-    url = f"https://uldk.gugik.gov.pl/request.php?request=GetParcelByXY&xy={x_2177},{y_2177},2177&result=id,voivodeship,county,commune,region,parcel"
+def uldk_pobierz_dzialke_z_geometria(x_2177, y_2177):
+    url = f"https://uldk.gugik.gov.pl/request.php?request=GetParcelByXY&xy={x_2177},{y_2177},2177&result=id,commune,parcel,geom_wkt"
     try:
-        resp = requests.get(url, timeout=2)
+        resp = requests.get(url, timeout=3)
         if resp.status_code == 200 and not resp.text.startswith("-1"):
-            p = resp.text.strip().split("\n")[1].split("|")
-            return {'id_dzialki': p[0], 'gmina': p[3], 'nr_dzialki': p[5], 'x': x_2177, 'y': y_2177}
-    except: pass
+            lines = resp.text.strip().split("\n")
+            if len(lines) >= 2:
+                p = lines[1].split("|")
+                id_d = p[0]
+                gmina = p[1]
+                nr_d = p[2]
+                wkt_str = p[3] if len(p) > 3 else None
+                geom = wkt_loads(wkt_str) if wkt_str else None
+                return {'id_dzialki': id_d, 'gmina': gmina, 'nr_dzialki': nr_d, 'geom': geom, 'x': x_2177, 'y': y_2177}
+    except Exception: pass
     return None
 
 def szacuj_cene_m2_avm(odleglosc_dom_km):
@@ -123,7 +131,7 @@ def szacuj_cene_m2_avm(odleglosc_dom_km):
 # ==============================================================================
 # 4. INTERFEJS UŻYTKOWNIKA
 # ==============================================================================
-st.sidebar.title("⚡ PrzeSmyk v2.1")
+st.sidebar.title("⚡ PrzeSmyk v2.3")
 st.sidebar.caption("Centrum Dowodzenia Terenowego")
 st.sidebar.markdown("---")
 
@@ -134,7 +142,6 @@ st.sidebar.caption(f"🎯 Zlokalizowano: **{opis_lokalizacji}**")
 
 przelicz_button = st.sidebar.button("🚗 PRZELICZ TRASĘ NA DZIŚ", type="primary")
 
-# NOWY TYTUŁ APLIKACJI
 st.title("⚡ PrzeSmyk: Sprytny Planer Służebności Przesyłu")
 
 tab1, tab2, tab3 = st.tabs(["🗺️ Ranking & Nawigacja", "📝 CRM", "📋 Baza Wpisów"])
@@ -143,7 +150,7 @@ if przelicz_button:
     pobierz_plik_jesli_brak(URL_SIECI, PLIK_SIECI)
     pobierz_plik_jesli_brak(URL_SLUPY, PLIK_SLUPY)
     
-    with st.spinner("Odpytuję GUGiK, odrzucam bloki i buduję linki bezpośrednie..."):
+    with st.spinner("Skanuję linie przesyłowe w całym obszarze (odrzucam bloki oraz działki z liniami <5m od granicy)..."):
         dom_x, dom_y = transformer_4326_to_2177.transform(current_lon, current_lat)
         punkt_dom = Point(dom_x, dom_y)
         odwiedzone_ids = get_visited_ids()
@@ -153,30 +160,50 @@ if przelicz_button:
 
         sieci['dist'] = sieci.geometry.distance(punkt_dom) / 1000.0
         sieci = sieci.sort_values(by='dist', ascending=True)
+        
+        TARGET_COUNT = 15  # Cel: Znalezienie min. 15 prawidłowych domów/firm
         wykryte_dzialki = {}
         
-        for idx, linia in sieci.head(40).iterrows():
+        # Pętla bez sztywnego stopu head(40) - skanuje linie w promieniu 7 powiatów do skutku!
+        for idx, linia in sieci.iterrows():
+            if len(wykryte_dzialki) >= TARGET_COUNT:
+                break
+                
             opis_nap = str(linia.get('napiecie', linia.get('rodzaj', '110 kV'))).upper()
             szerokosc_strefy = 15.0
             for k, v in STREFY_SLUZEBNOSCI.items():
                 if k in opis_nap.lower(): szerokosc_strefy = v; break
             
             dlugosc = linia.geometry.length
-            for d in range(0, int(dlugosc), 150):
+            for d in range(0, int(dlugosc), 120):
+                if len(wykryte_dzialki) >= TARGET_COUNT:
+                    break
+                    
                 pt = linia.geometry.interpolate(d)
-                dzialka = uldk_pobierz_dzialke(pt.x, pt.y)
+                dzialka = uldk_pobierz_dzialke_z_geometria(pt.x, pt.y)
                 if dzialka:
                     id_d = dzialka['id_dzialki']
-                    if id_d in odwiedzone_ids: continue
+                    if id_d in odwiedzone_ids or id_d in wykryte_dzialki: continue
+                    
+                    # 1. FILTR > 5 METRÓW OD GRANICY DZIAŁKI
+                    poly = dzialka.get('geom')
+                    if poly and not poly.is_empty:
+                        rdzen_dzialki = poly.buffer(-5.0)
+                        if rdzen_dzialki.is_empty or not rdzen_dzialki.intersects(linia.geometry):
+                            continue  # Linia zbiega za blisko granicy (<5m) - pomijamy
                     
                     lon_wgs, lat_wgs = transformer_2177_to_4326.transform(pt.x, pt.y)
                     adres_czysty, ok, typ_terenu = pobierz_adres_i_filtr_zabudowy(lat_wgs, lon_wgs, dzialka['nr_dzialki'])
                     
+                    # 2. FILTR ZABUDOWY WIELORODZINNEJ (BLOKÓW)
                     if not ok: continue
                         
-                    if id_d not in wykryte_dzialki:
-                        dzialka.update({'szer_pasa': szerokosc_strefy, 'rodzaj': opis_nap, 'adres': adres_czysty, 'typ': typ_terenu, 'lat': lat_wgs, 'lon': lon_wgs, 'dist': linia['dist']})
-                        wykryte_dzialki[id_d] = dzialka
+                    dzialka.update({
+                        'szer_pasa': szerokosc_strefy, 'rodzaj': opis_nap,
+                        'adres': adres_czysty, 'typ': typ_terenu,
+                        'lat': lat_wgs, 'lon': lon_wgs, 'dist': linia['dist']
+                    })
+                    wykryte_dzialki[id_d] = dzialka
         
         lista_rankingowa = []
         for id_d, d in wykryte_dzialki.items():
@@ -199,9 +226,9 @@ if przelicz_button:
         df = pd.DataFrame(lista_rankingowa)
         if not df.empty:
             st.session_state['rank'] = df.sort_values(by='Roszczenie', ascending=False).reset_index(drop=True)
-            st.success("✅ Teren przefiltrowany. Bloki odrzucone. Trasa gotowa!")
+            st.success(f"✅ Znaleziono {len(df)} idealnych domów jednorodzinnych/firm spełniających warunek linii >5m od granicy!")
         else:
-            st.warning("Brak domów jednorodzinnych w tym rejonie (same bloki lub brak linii).")
+            st.warning("Nie znaleziono działek spełniających rygorystyczne kryteria w tym obszarze.")
 
 with tab1:
     if 'rank' in st.session_state:
