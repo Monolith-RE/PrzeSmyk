@@ -34,6 +34,13 @@ STREFY_SLUZEBNOSCI = {
 }
 WSPOLCZYNNIK_WSPOLKORZYSTANIA = 0.5
 
+# Słowa kluczowe dyskwalifikujące osiedla i bloki
+CZARNA_LISTA_OSIEDLI = [
+    'osiedle', 'os.', 'blok', 'bloki', 'apartament', 'apartamenty', 
+    'apartments', 'flats', 'residential', 'wielorodzinny', 'wielorodzinna',
+    'spółdzielnia', 'spoldzielnia', 'wieżowiec', 'wiezowiec', 'mieszkaniowa'
+]
+
 # ==============================================================================
 # 2. BAZA DANYCH CRM
 # ==============================================================================
@@ -96,7 +103,7 @@ def pobierz_plik_jesli_brak(url, nazwa_pliku):
 init_db()
 
 # ==============================================================================
-# 3. SILNIK GEODEZYJNY & ADRESOWY Z FILTREM BLOKOWISK
+# 3. SILNIK GEODEZYJNY & ADRESOWY
 # ==============================================================================
 transformer_4326_to_2177 = Transformer.from_crs("EPSG:4326", "EPSG:2177", always_xy=True)
 transformer_2177_to_4326 = Transformer.from_crs("EPSG:2177", "EPSG:4326", always_xy=True)
@@ -114,7 +121,7 @@ def geokoduj_wpis_startowy(tekst_wpisu):
     
     try:
         url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(tekst)}&format=json&limit=1"
-        headers = {'User-Agent': 'PrzeSmykApp/2.0'}
+        headers = {'User-Agent': 'PrzeSmykApp/3.0'}
         r = requests.get(url, headers=headers, timeout=3)
         if r.status_code == 200 and len(r.json()) > 0:
             res = r.json()[0]
@@ -126,45 +133,46 @@ def geokoduj_wpis_startowy(tekst_wpisu):
         
     return 50.0931, 19.9525, "ul. Nad Sudołem 32, Kraków"
 
-def pobierz_adres_i_filtr_zabudowy(lat, lon):
+def pobierz_adres_i_filtr_zabudowy(lat, lon, nr_dzialki_ewidencja):
     """
-    Pobiera czysty adres w formacie: Miejscowość, Ulica Numer.
-    Odrzuca osiedla bloków i zabudowę wielorodzinną!
+    Rygorystyczny filtr: odrzuca osiedla i bloki wielorodzinne.
+    Zwraca czysty adres w formacie: Miejscowość, Ulica Numer.
     """
     try:
-        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1"
-        headers = {'User-Agent': 'PrzeSmykApp/2.0'}
+        url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1&extratags=1"
+        headers = {'User-Agent': 'PrzeSmykApp/3.0'}
         r = requests.get(url, headers=headers, timeout=2)
         if r.status_code == 200:
             data = r.json()
-            addr = data.get('address', {})
+            raw_text = str(data).lower()
             
+            # 1. BEZWZGLĘDNA WERYFIKACJA CZARNEJ LISTY (OSIEDLA I BLOKI)
+            if any(słowo in raw_text for słowo in CZARNA_LISTA_OSIEDLI):
+                return "", False, "Osiedle Wielorodzinne / Bloki"
+            
+            addr = data.get('address', {})
             miasto = addr.get('city') or addr.get('town') or addr.get('village') or addr.get('municipality') or "Kraków"
             ulica = addr.get('road') or addr.get('pedestrian') or ""
             numer = addr.get('house_number') or ""
             
+            # Formatowanie adresu: Miejscowość, Ulica Numer
             if ulica and numer:
                 adres_czysty = f"{miasto}, ul. {ulica} {numer}"
             elif ulica:
                 adres_czysty = f"{miasto}, ul. {ulica}"
             else:
-                adres_czysty = f"{miasto}"
+                adres_czysty = f"{miasto}, dz. nr {nr_dzialki_ewidencja}"
                 
-            # WERYFIKACJA TYPU ZABUDOWY (FILTR BLOKÓW I OSIEDLI)
-            raw_type = str(data.get('addresstype', '')).lower() + " " + str(data.get('type', '')).lower()
+            raw_type = str(data.get('addresstype', '')).lower() + " " + str(data.get('type', '')).lower() + " " + str(data.get('class', '')).lower()
             
-            # Jeśli system wykryje bloki / mieszkalnictwo wielorodzinne -> ODRZUCAMY
-            if any(b in raw_type for b in ['apartments', 'flats', 'residential_area']):
-                return adres_czysty, False, "Osiedle Wielorodzinne"
-            
-            if any(b in raw_type for b in ['commercial', 'industrial', 'retail', 'office', 'warehouse']):
+            if any(b in raw_type for b in ['commercial', 'industrial', 'retail', 'office', 'warehouse', 'company', 'works']):
                 return adres_czysty, True, "Siedziba Przedsiębiorstwa / Usługi"
             else:
                 return adres_czysty, True, "Dom Jednorodzinny / Posesja Prywatna"
     except Exception:
         pass
         
-    return "Kraków, ul. Siewna", True, "Nieruchomość Prywatna / Firma"
+    return f"Kraków, dz. nr {nr_dzialki_ewidencja}", True, "Nieruchomość Prywatna / Firma"
 
 def uldk_pobierz_dzialke(x_2177, y_2177):
     url = f"https://uldk.gugik.gov.pl/request.php?request=GetParcelByXY&xy={x_2177},{y_2177},2177&result=id,voivodeship,county,commune,region,parcel"
@@ -186,7 +194,6 @@ def uldk_pobierz_dzialke(x_2177, y_2177):
     except Exception:
         pass
     
-    lon_w, lat_w = transformer_2177_to_4326.transform(x_2177, y_2177)
     return {
         'id_dzialki': f"126101_1.0001.{int(x_2177%500)}/{int(y_2177%50)}",
         'wojewodztwo': "Małopolskie", 'powiat': "m. Kraków",
@@ -232,7 +239,7 @@ if przelicz_button:
     pobierz_plik_jesli_brak(URL_SIECI, PLIK_SIECI)
     pobierz_plik_jesli_brak(URL_SLUPY, PLIK_SLUPY)
     
-    with st.spinner("PrzeSmyk odrzuca osiedla wielorodzinne i generuje bezpośrednie linki..."):
+    with st.spinner("PrzeSmyk filtruje tereny, usuwa bloki i generuje bezpośrednie odnośniki..."):
         dom_x, dom_y = transformer_4326_to_2177.transform(current_lon, current_lat)
         punkt_dom = Point(dom_x, dom_y)
         
@@ -246,7 +253,7 @@ if przelicz_button:
         
         wykryte_dzialki = {}
         
-        for idx, linia in sieci.head(30).iterrows():
+        for idx, linia in sieci.head(40).iterrows():
             opis_napiecia = str(linia.get('napiecie', linia.get('rodzaj', '110 kV'))).upper()
             szerokosc_strefy = 15.0
             for k, v in STREFY_SLUZEBNOSCI.items():
@@ -261,9 +268,9 @@ if przelicz_button:
                     if id_d in odwiedzone_ids: continue
                     
                     lon_wgs, lat_wgs = transformer_2177_to_4326.transform(pt.x, pt.y)
-                    adres_czysty, czy_dozwolona, typ_terenu = pobierz_adres_i_filtr_zabudowy(lat_wgs, lon_wgs)
+                    adres_czysty, czy_dozwolona, typ_terenu = pobierz_adres_i_filtr_zabudowy(lat_wgs, lon_wgs, dzialka['nr_dzialki'])
                     
-                    # FILTRACJA: Pomijamy osiedla bloków mieszkaniowych!
+                    # RYGORYSTYCZNY FILTR: Odrzucamy jakiekolwiek osiedla wielorodzinne!
                     if not czy_dozwolona:
                         continue
                         
@@ -290,10 +297,17 @@ if przelicz_button:
             pow_pasa_m2 = dlugosc_przebiegu_m * d['szerokosc_pasa_m']
             roszczenie = pow_pasa_m2 * cena_m2 * WSPOLCZYNNIK_WSPOLKORZYSTANIA
             
-            # Precyzyjne linki geodezyjne kierujące wprost do konkretnej działki:
-            link_geoportal = f"https://mapy.geoportal.gov.pl/imap/Imgp_2.html?search={id_d}"
-            link_emapa = f"https://polska.e-mapa.net?szukaj={id_d}"
-            link_ongeo = f"https://ongeo.pl/raporty/szukaj?phrase={id_d}"
+            # PRECYZYJNE LINKI GEODEZYJNE:
+            # 1. Geoportal -> Bezpośrednie wywołanie silnika ULDK (otwiera mapę z zaznaczoną tą działką)
+            link_geoportal = f"https://uldk.gugik.gov.pl/r.php?id={id_d}"
+            
+            # 2. Polska e-Mapa -> Otwiera mapę z wyśrodkowaniem na metrycznych koordynatach działki
+            link_emapa = f"https://polska.e-mapa.net?x={d['geometria_pt'].x:.2f}&y={d['geometria_pt'].y:.2f}&crs=EPSG:2177"
+            
+            # 3. OnGeo.pl -> Przechodzi do formularza generatora raportu dla współrzędnych działki
+            link_ongeo = f"https://ongeo.pl/raporty?lat={d['lat_wgs']:.6f}&lon={d['lon_wgs']:.6f}"
+            
+            # 4. Google Maps -> Nawigacja samochodowa
             link_gmaps = f"https://www.google.com/maps?q={d['lat_wgs']},{d['lon_wgs']}"
             
             lista_rankingowa.append({
@@ -344,10 +358,10 @@ with tab1:
                             f"⚡ **Słupy na działce:** `{row['Slupy']} szt.`\n"
                             f"📐 **Powierzchnia pasa:** `{row['Pow_Pasa_m2']} m²`")
                 
-                c3.markdown(f"🌐 **Direct Linki Geodezyjne:**\n"
-                            f"• [Otwórz w Geoportal.gov.pl]({row['Link_Geoportal']})\n"
-                            f"• [Otwórz w Polska e-Mapa]({row['Link_Emapa']})\n"
-                            f"• [Otwórz Raport OnGeo.pl]({row['Link_Ongeo']})")
+                c3.markdown(f"🌐 **Bezpośrednie Linki Geodezyjne:**\n"
+                            f"• [Otwórz Działkę w Geoportal.gov.pl]({row['Link_Geoportal']})\n"
+                            f"• [Otwórz Działkę w Polska e-Mapa]({row['Link_Emapa']})\n"
+                            f"• [Otwórz Raport w OnGeo.pl]({row['Link_Ongeo']})")
                 
                 b1, b2, b3 = st.columns([3, 3, 3])
                 
