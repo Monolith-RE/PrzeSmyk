@@ -46,6 +46,13 @@ def get_visited_ids():
     c.execute("SELECT id_dzialki FROM historia_dzialek WHERE status IN ('Odwiedzona', 'Finalizacja', 'Odmowa')")
     rows = c.fetchall(); conn.close(); return [r[0] for r in rows]
 
+# Przywrócona funkcja pobierająca rekordy!
+def get_all_crm_records():
+    conn = sqlite3.connect(DB_NAME)
+    df = pd.read_sql_query("SELECT * FROM historia_dzialek ORDER BY data_aktualizacji DESC", conn)
+    conn.close()
+    return df
+
 def pobierz_plik_jesli_brak(url, nazwa_pliku):
     if not os.path.exists(nazwa_pliku):
         with st.spinner(f"Pobieranie bazy {nazwa_pliku}..."):
@@ -69,21 +76,20 @@ def geokoduj_wpis_startowy(tekst_wpisu):
     if match: return float(match.group(1)), float(match.group(2)), f"GPS ({float(match.group(1)):.4f}, {float(match.group(2)):.4f})"
     try:
         url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(tekst)}&format=json&limit=1"
-        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/4.0'}, timeout=3)
+        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/5.0'}, timeout=3)
         if r.status_code == 200 and len(r.json()) > 0:
-            return float(r.json()[0]['lat']), float(r.json()[0]['lon']), tekst
+            return float(r.json()[0]['lat']), float(r.json()[0]['lon']), r.json()[0].get('display_name', tekst).split(',')[0]
     except: pass
-    return 50.0931, 19.9525, "Kraków (Domyślnie)"
+    return 50.0931, 19.9525, "Brak adresu w bazie (Domyślnie Kraków)"
 
 def pobierz_adres_i_filtr_zabudowy(lat, lon, nr_dzialki_ewidencja):
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1&extratags=1"
-        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/4.0'}, timeout=2)
+        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/5.0'}, timeout=2)
         if r.status_code == 200:
             data = r.json()
             raw_text = str(data).lower()
             
-            # BRUTALNY FILTR BLOKÓW
             if any(s in raw_text for s in CZARNA_LISTA): return "", False, "Osiedle / Bloki"
             if data.get('extratags', {}).get('building') in ['apartments', 'residential', 'dormitory', 'terrace']: 
                 return "", False, "Wielorodzinny"
@@ -115,21 +121,23 @@ def szacuj_cene_m2_avm(odleglosc_dom_km):
     return max(180.0, 600.0 - (odleglosc_dom_km * 8.0))
 
 # ==============================================================================
-# 4. INTERFEJS
+# 4. INTERFEJS UŻYTKOWNIKA
 # ==============================================================================
-st.sidebar.title("⚡ PrzeSmyk v2.0")
+st.sidebar.title("⚡ PrzeSmyk v2.1")
 st.sidebar.caption("Centrum Dowodzenia Terenowego")
 st.sidebar.markdown("---")
 
 st.sidebar.subheader("📍 Start Marszruty")
-wpis_lokalizacji = st.sidebar.text_input("Wpisz punkt startu lub wklej GPS:", value="ul. Nad Sudołem 32, Kraków")
+wpis_lokalizacji = st.sidebar.text_input("Wpisz z palca miasto, ulicę lub numer domu:", value="Kraków, ul. Nad Sudołem 32")
 current_lat, current_lon, opis_lokalizacji = geokoduj_wpis_startowy(wpis_lokalizacji)
-st.sidebar.caption(f"📍 Start: **{opis_lokalizacji}**")
+st.sidebar.caption(f"🎯 Zlokalizowano: **{opis_lokalizacji}**")
 
-przelicz_button = st.sidebar.button("🚗 PRZELICZ TRASĘ", type="primary")
-st.title("⚡ PrzeSmyk: Analityka Służebności")
+przelicz_button = st.sidebar.button("🚗 PRZELICZ TRASĘ NA DZIŚ", type="primary")
 
-tab1, tab2, tab3 = st.tabs(["🗺️ Ranking & Nawigacja", "📝 CRM", "📋 Baza"])
+# NOWY TYTUŁ APLIKACJI
+st.title("⚡ PrzeSmyk: Sprytny Planer Służebności Przesyłu")
+
+tab1, tab2, tab3 = st.tabs(["🗺️ Ranking & Nawigacja", "📝 CRM", "📋 Baza Wpisów"])
 
 if przelicz_button:
     pobierz_plik_jesli_brak(URL_SIECI, PLIK_SIECI)
@@ -164,7 +172,7 @@ if przelicz_button:
                     lon_wgs, lat_wgs = transformer_2177_to_4326.transform(pt.x, pt.y)
                     adres_czysty, ok, typ_terenu = pobierz_adres_i_filtr_zabudowy(lat_wgs, lon_wgs, dzialka['nr_dzialki'])
                     
-                    if not ok: continue # BLOKI ODRZUCONE
+                    if not ok: continue
                         
                     if id_d not in wykryte_dzialki:
                         dzialka.update({'szer_pasa': szerokosc_strefy, 'rodzaj': opis_nap, 'adres': adres_czysty, 'typ': typ_terenu, 'lat': lat_wgs, 'lon': lon_wgs, 'dist': linia['dist']})
@@ -177,7 +185,6 @@ if przelicz_button:
             pow_pasa = 85.0 * d['szer_pasa']
             roszczenie = pow_pasa * cena * WSPOLCZYNNIK_WSPOLKORZYSTANIA
             
-            # NAPRAWIONE LINKI - BEZPOŚREDNIE KIEROWANIE NA MAPY
             link_geo = f"https://mapy.geoportal.gov.pl/imap/Imgp_2.html?identifyParcel={id_d}"
             link_ema = f"https://polska.e-mapa.net/?dzialka={id_d}"
             link_ong = f"https://ongeo.pl/mapa?x={d['lon']:.6f}&y={d['lat']:.6f}&zoom=19"
