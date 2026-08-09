@@ -297,7 +297,7 @@ def szacuj_cene_m2_avm(odleglosc_dom_km):
 # ==============================================================================
 # 4. INTERFEJS UŻYTKOWNIKA
 # ==============================================================================
-st.sidebar.title("🚙⚡🔥 PrzeSmyk v2.7")
+st.sidebar.title("🚙⚡🔥 PrzeSmyk v2.8")
 st.sidebar.caption("Centrum Dowodzenia Terenowego")
 st.sidebar.markdown("---")
 
