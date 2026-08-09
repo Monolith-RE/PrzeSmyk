@@ -12,7 +12,7 @@ from pyproj import Transformer
 import time
 
 # ==============================================================================
-# 1. KONFIGURACJA PROJEKTU "PrzeSmyk" (ZESTAW A: 🚙⚡🔥)
+# 1. KONFIGURACJA PROJEKTU "PrzeSmyk"
 # ==============================================================================
 DB_NAME = "PrzeSmyk_crm.db"
 PLIK_SIECI = "sieci_komplet.gpkg"
@@ -23,7 +23,7 @@ URL_SIECI = "https://github.com/Monolith-RE/PrzeSmyk/releases/download/v1.0/siec
 URL_SLUPY = "https://github.com/Monolith-RE/PrzeSmyk/releases/download/v1.0/slupy_komplet.gpkg"
 
 st.set_page_config(
-    page_title="PrzeSmyk: Sprytny Planer Służebności Przesyłu",
+    page_title="PrzeSmyk",
     page_icon="🚙",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -69,7 +69,7 @@ def pobierz_plik_jesli_brak(url, nazwa_pliku):
 init_db()
 
 # ==============================================================================
-# 3. SILNIK GIS Z SKANOWANIEM DYNAMICZNYM
+# 3. SILNIK GIS Z OGRANICZENIEM DO 5 KM
 # ==============================================================================
 transformer_4326_to_2177 = Transformer.from_crs("EPSG:4326", "EPSG:2177", always_xy=True)
 transformer_2177_to_4326 = Transformer.from_crs("EPSG:2177", "EPSG:4326", always_xy=True)
@@ -81,7 +81,7 @@ def geokoduj_wpis_startowy(tekst_wpisu):
     if match: return float(match.group(1)), float(match.group(2)), f"GPS ({float(match.group(1)):.4f}, {float(match.group(2)):.4f})"
     try:
         url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(tekst)}&format=json&limit=1"
-        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/8.0'}, timeout=3)
+        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/9.0'}, timeout=3)
         if r.status_code == 200 and len(r.json()) > 0:
             res = r.json()[0]
             return float(res['lat']), float(res['lon']), res.get('display_name', tekst).split(',')[0]
@@ -91,7 +91,7 @@ def geokoduj_wpis_startowy(tekst_wpisu):
 def pobierz_adres_i_filtr_zabudowy(lat, lon, nr_dzialki_ewidencja):
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1&extratags=1"
-        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/8.0'}, timeout=2)
+        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/9.0'}, timeout=2)
         if r.status_code == 200:
             data = r.json()
             raw_text = str(data).lower()
@@ -134,9 +134,9 @@ def szacuj_cene_m2_avm(odleglosc_dom_km):
     return max(180.0, 600.0 - (odleglosc_dom_km * 8.0))
 
 # ==============================================================================
-# 4. INTERFEJS UŻYTKOWNIKA (JEPI, ENERGIA, GAZ)
+# 4. INTERFEJS UŻYTKOWNIKA
 # ==============================================================================
-st.sidebar.title("🚙⚡🔥 PrzeSmyk v2.4")
+st.sidebar.title("🚙⚡🔥 PrzeSmyk v2.5")
 st.sidebar.caption("Centrum Dowodzenia Terenowego")
 st.sidebar.markdown("---")
 
@@ -147,97 +147,115 @@ st.sidebar.caption(f"🎯 Zlokalizowano: **{opis_lokalizacji}**")
 
 przelicz_button = st.sidebar.button("🚙 PRZELICZ TRASĘ", type="primary")
 
-st.title("🚙⚡🔥 PrzeSmyk: Sprytny Planer Służebności Przesyłu")
-
+# BRAK DUŻEGO NAGŁÓWKA W OKNIE GŁÓWNYM
 tab1, tab2, tab3 = st.tabs(["🗺️ Trasa & Operat", "📝 CRM Terenowy", "🗂️ Baza Działek"])
 
 if przelicz_button:
     pobierz_plik_jesli_brak(URL_SIECI, PLIK_SIECI)
     pobierz_plik_jesli_brak(URL_SLUPY, PLIK_SLUPY)
     
-    with st.spinner("Skanuję linie przesyłowe w obszarze 7 powiatów (odrzucam bloki oraz linie <5m od granicy)..."):
+    # SPINNER - OBRACAJĄCA SIĘ KLEPSYDRA
+    with st.spinner("⏳ Trwa analiza terenu w promieniu 5 km od punktu startu..."):
         dom_x, dom_y = transformer_4326_to_2177.transform(current_lon, current_lat)
         punkt_dom = Point(dom_x, dom_y)
+        bufor_5km = punkt_dom.buffer(5000.0)  # Sztywny promień 5 km
+        
         odwiedzone_ids = get_visited_ids()
         
         sieci = gpd.read_file(PLIK_SIECI).to_crs("EPSG:2177")
         slupy = gpd.read_file(PLIK_SLUPY).to_crs("EPSG:2177") if os.path.exists(PLIK_SLUPY) else gpd.GeoDataFrame()
 
-        sieci['dist'] = sieci.geometry.distance(punkt_dom) / 1000.0
-        sieci = sieci.sort_values(by='dist', ascending=True)
+        # Wycięcie przestrzenne do bufora 5 km
+        sieci_5km = sieci[sieci.geometry.intersects(bufor_5km)].copy()
         
-        TARGET_COUNT = 15
-        wykryte_dzialki = {}
-        
-        for idx, linia in sieci.iterrows():
-            if len(wykryte_dzialki) >= TARGET_COUNT:
-                break
-                
-            opis_nap = str(linia.get('napiecie', linia.get('rodzaj', '110 kV'))).upper()
-            szerokosc_strefy = 15.0
-            for k, v in STREFY_SLUZEBNOSCI.items():
-                if k in opis_nap.lower(): szerokosc_strefy = v; break
+        if sieci_5km.empty:
+            st.warning("Nie znaleziono żadnych linii przesyłowych w promieniu 5 km od wskazanego punktu.")
+        else:
+            sieci_5km['geometry'] = sieci_5km.geometry.intersection(bufor_5km)
+            sieci_5km['dist'] = sieci_5km.geometry.distance(punkt_dom) / 1000.0
+            sieci_5km = sieci_5km.sort_values(by='dist', ascending=True)
             
-            dlugosc = linia.geometry.length
-            for d in range(0, int(dlugosc), 120):
+            TARGET_COUNT = 100  # Docelowa liczba działek
+            wykryte_dzialki = {}
+            
+            for idx, linia in sieci_5km.iterrows():
                 if len(wykryte_dzialki) >= TARGET_COUNT:
                     break
                     
-                pt = linia.geometry.interpolate(d)
-                dzialka = uldk_pobierz_dzialke_z_geometria(pt.x, pt.y)
-                if dzialka:
-                    id_d = dzialka['id_dzialki']
-                    if id_d in odwiedzone_ids or id_d in wykryte_dzialki: continue
-                    
-                    poly = dzialka.get('geom')
-                    if poly and not poly.is_empty:
-                        rdzen_dzialki = poly.buffer(-5.0)
-                        if rdzen_dzialki.is_empty or not rdzen_dzialki.intersects(linia.geometry):
-                            continue
-                    
-                    lon_wgs, lat_wgs = transformer_2177_to_4326.transform(pt.x, pt.y)
-                    adres_czysty, ok, typ_terenu = pobierz_adres_i_filtr_zabudowy(lat_wgs, lon_wgs, dzialka['nr_dzialki'])
-                    
-                    if not ok: continue
+                opis_nap = str(linia.get('napiecie', linia.get('rodzaj', '110 kV'))).upper()
+                szerokosc_strefy = 15.0
+                for k, v in STREFY_SLUZEBNOSCI.items():
+                    if k in opis_nap.lower(): szerokosc_strefy = v; break
+                
+                dlugosc = linia.geometry.length
+                for d in range(0, int(dlugosc), 100):
+                    if len(wykryte_dzialki) >= TARGET_COUNT:
+                        break
                         
-                    dzialka.update({
-                        'szer_pasa': szerokosc_strefy, 'rodzaj': opis_nap,
-                        'adres': adres_czysty, 'typ': typ_terenu,
-                        'lat': lat_wgs, 'lon': lon_wgs, 'dist': linia['dist']
-                    })
-                    wykryte_dzialki[id_d] = dzialka
-        
-        lista_rankingowa = []
-        for id_d, d in wykryte_dzialki.items():
-            ilosc_slupow = len(slupy[slupy.geometry.intersects(Point(d['x'], d['y']).buffer(30.0))]) if not slupy.empty else 0
-            cena = szacuj_cene_m2_avm(d['dist'])
-            pow_pasa = 85.0 * d['szer_pasa']
-            roszczenie = pow_pasa * cena * WSPOLCZYNNIK_WSPOLKORZYSTANIA
+                    pt = linia.geometry.interpolate(d)
+                    dzialka = uldk_pobierz_dzialke_z_geometria(pt.x, pt.y)
+                    if dzialka:
+                        id_d = dzialka['id_dzialki']
+                        if id_d in odwiedzone_ids or id_d in wykryte_dzialki: continue
+                        
+                        poly = dzialka.get('geom')
+                        if poly and not poly.is_empty:
+                            rdzen_dzialki = poly.buffer(-5.0)
+                            if rdzen_dzialki.is_empty or not rdzen_dzialki.intersects(linia.geometry):
+                                continue
+                        
+                        lon_wgs, lat_wgs = transformer_2177_to_4326.transform(pt.x, pt.y)
+                        adres_czysty, ok, typ_terenu = pobierz_adres_i_filtr_zabudowy(lat_wgs, lon_wgs, dzialka['nr_dzialki'])
+                        
+                        if not ok: continue
+                            
+                        dzialka.update({
+                            'szer_pasa': szerokosc_strefy, 'rodzaj': opis_nap,
+                            'adres': adres_czysty, 'typ': typ_terenu,
+                            'lat': lat_wgs, 'lon': lon_wgs, 'dist': linia['dist']
+                        })
+                        wykryte_dzialki[id_d] = dzialka
             
-            link_geo = f"https://mapy.geoportal.gov.pl/imap/Imgp_2.html?identifyParcel={id_d}"
-            link_ema = f"https://polska.e-mapa.net/?dzialka={id_d}"
-            link_ong = f"https://ongeo.pl/mapa?x={d['lon']:.6f}&y={d['lat']:.6f}&zoom=19"
-            link_gmaps = f"https://www.google.com/maps?q={d['lat']},{d['lon']}"
-            
-            # Weryfikacja mediów: Elektryczność vs Gaz
-            rodzaj_mediow = "🔥 Gazociąg" if "GAZ" in d['rodzaj'] else "⚡ Linia Elektroenergetyczna"
-            
-            lista_rankingowa.append({
-                'ID': id_d, 'Adres': d['adres'], 'Gmina': d['gmina'], 'Nr': d['nr_dzialki'], 'Typ': d['typ'],
-                'Linia': f"{rodzaj_mediow} ({d['rodzaj']})", 'Pow': pow_pasa, 'Cena': cena, 'Roszczenie': round(roszczenie, 2),
-                'Slupy': ilosc_slupow, 'LinkG': link_geo, 'LinkE': link_ema, 'LinkO': link_ong, 'LinkM': link_gmaps
-            })
-            
-        df = pd.DataFrame(lista_rankingowa)
-        if not df.empty:
-            st.session_state['rank'] = df.sort_values(by='Roszczenie', ascending=False).reset_index(drop=True)
-            st.success(f"✅ Znaleziono {len(df)} idealnych domów jednorodzinnych/firm spełniających warunek linii >5m od granicy!")
-        else:
-            st.warning("Nie znaleziono działek spełniających rygorystyczne kryteria w tym obszarze.")
+            lista_rankingowa = []
+            for id_d, d in wykryte_dzialki.items():
+                ilosc_slupow = len(slupy[slupy.geometry.intersects(Point(d['x'], d['y']).buffer(30.0))]) if not slupy.empty else 0
+                cena = szacuj_cene_m2_avm(d['dist'])
+                pow_pasa = 85.0 * d['szer_pasa']
+                roszczenie = pow_pasa * cena * WSPOLCZYNNIK_WSPOLKORZYSTANIA
+                
+                link_geo = f"https://mapy.geoportal.gov.pl/imap/Imgp_2.html?identifyParcel={id_d}"
+                link_ema = f"https://polska.e-mapa.net/?dzialka={id_d}"
+                link_ong = f"https://ongeo.pl/mapa?x={d['lon']:.6f}&y={d['lat']:.6f}&zoom=19"
+                link_gmaps = f"https://www.google.com/maps?q={d['lat']},{d['lon']}"
+                
+                rodzaj_mediow = "🔥 Gazociąg" if "GAZ" in d['rodzaj'] else "⚡ Linia Elektroenergetyczna"
+                
+                lista_rankingowa.append({
+                    'ID': id_d, 'Adres': d['adres'], 'Gmina': d['gmina'], 'Nr': d['nr_dzialki'], 'Typ': d['typ'],
+                    'Linia': f"{rodzaj_mediow} ({d['rodzaj']})", 'Pow': pow_pasa, 'Cena': cena, 'Roszczenie': round(roszczenie, 2),
+                    'Slupy': ilosc_slupow, 'Dist': d['dist'],
+                    'LinkG': link_geo, 'LinkE': link_ema, 'LinkO': link_ong, 'LinkM': link_gmaps
+                })
+                
+            df = pd.DataFrame(lista_rankingowa)
+            if not df.empty:
+                df = df.sort_values(by=['Roszczenie', 'Dist'], ascending=[False, True]).reset_index(drop=True)
+                st.session_state['rank'] = df
+                df.to_excel(PLIK_WYNIKOWY, index=False)
+                
+                if len(df) < 100:
+                    st.warning(f"⚠️ W promieniu 5 km od miejsca startu znaleziono {len(df)} działek spełniających wszystkie kryteria (mniej niż docelowe 100).")
+                else:
+                    st.success(f"✅ Wygenerowano pełną marszrutę obejmującą TOP 100 działek w promieniu 5 km!")
+            else:
+                st.warning("Nie znaleziono działek spełniających kryteria w promieniu 5 km od wskazanego punktu.")
 
 with tab1:
     if 'rank' in st.session_state:
-        for idx, row in st.session_state['rank'].head(15).iterrows():
+        df_rank = st.session_state['rank']
+        st.subheader(f"📍 Marszruta Terenowa: {len(df_rank)} działek")
+        
+        for idx, row in df_rank.iterrows():
             st.markdown(f"### {idx+1}. {row['Adres']}")
             c1, c2, c3 = st.columns([3, 3, 3])
             c1.markdown(f"📍 **Gmina:** {row['Gmina']}\n🆔 **ID Działki:** `{row['ID']}`\n{row['Typ']}")
