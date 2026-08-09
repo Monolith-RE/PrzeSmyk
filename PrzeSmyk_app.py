@@ -1,7 +1,9 @@
 import io
+import json
 import os
 import re
 import sqlite3
+import threading
 import time
 from datetime import datetime
 
@@ -20,6 +22,7 @@ DB_NAME = "PrzeSmyk_crm.db"
 PLIK_SIECI = "sieci_komplet.gpkg"
 PLIK_SLUPY = "slupy_komplet.gpkg"
 PLIK_WYNIKOWY = "PrzeSmyk_Ranking.xlsx"
+STATUS_FILE = "job_status.json"
 
 URL_SIECI = "https://github.com/Monolith-RE/PrzeSmyk/releases/download/v1.0/sieci_komplet.gpkg"
 URL_SLUPY = "https://github.com/Monolith-RE/PrzeSmyk/releases/download/v1.0/slupy_komplet.gpkg"
@@ -52,9 +55,30 @@ CZARNA_LISTA = [
     "spółdzielnia",
 ]
 
+# ==============================================================================
+# 2. MECHANIZM STANU ZADANIA W TLE (JOB STATUS)
+# ==============================================================================
+def set_job_status(status, message="", count=0):
+    data = {
+        "status": status,
+        "message": message,
+        "count": count,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    with open(STATUS_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+def get_job_status():
+    if os.path.exists(STATUS_FILE):
+        try:
+            with open(STATUS_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"status": "IDLE", "message": "", "count": 0, "updated_at": ""}
 
 # ==============================================================================
-# 2. CRM BAZA DANYCH & MODUŁ EXCEL
+# 3. CRM BAZA DANYCH & EXCEL
 # ==============================================================================
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -68,7 +92,6 @@ def init_db():
                     data_aktualizacji TEXT)""")
     conn.commit()
     conn.close()
-
 
 def save_crm_record(id_dzialki, status, nr_kw, wlasciciel, notatka):
     conn = sqlite3.connect(DB_NAME)
@@ -87,7 +110,6 @@ def save_crm_record(id_dzialki, status, nr_kw, wlasciciel, notatka):
     conn.commit()
     conn.close()
 
-
 def get_visited_ids():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -98,7 +120,6 @@ def get_visited_ids():
     conn.close()
     return [r[0] for r in rows]
 
-
 def get_all_crm_records():
     conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query(
@@ -107,87 +128,61 @@ def get_all_crm_records():
     conn.close()
     return df
 
+@st.cache_data(show_spinner=False)
+def pobierz_i_zaladuj_dane_gis():
+    """Pobiera i keszuje ciężkie bazy geopaczek w pamięci RAM serwera."""
+    if not os.path.exists(PLIK_SIECI):
+        r = requests.get(URL_SIECI, stream=True, timeout=60)
+        if r.status_code == 200:
+            with open(PLIK_SIECI, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk: f.write(chunk)
 
-def pobierz_plik_jesli_brak(url, nazwa_pliku):
-    if not os.path.exists(nazwa_pliku):
-        with st.spinner(f"Pobieranie bazy {nazwa_pliku}..."):
-            r = requests.get(url, stream=True, timeout=30)
-            if r.status_code == 200:
-                with open(nazwa_pliku, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            f.write(chunk)
+    if not os.path.exists(PLIK_SLUPY):
+        r = requests.get(URL_SLUPY, stream=True, timeout=60)
+        if r.status_code == 200:
+            with open(PLIK_SLUPY, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk: f.write(chunk)
 
+    sieci = gpd.read_file(PLIK_SIECI).to_crs("EPSG:2177")
+    slupy = gpd.read_file(PLIK_SLUPY).to_crs("EPSG:2177") if os.path.exists(PLIK_SLUPY) else gpd.GeoDataFrame()
+    return sieci, slupy
 
 def generuj_i_zapisz_excel(df_ranking, plik_wyjsciowy=PLIK_WYNIKOWY):
-    """Zapisuje kompletny ranking do pliku Excel wraz z klikalnymi formułami HYPERLINK."""
     df_export = df_ranking.copy()
     if "Pozycja" not in df_export.columns:
         df_export.insert(0, "Pozycja", df_export.index + 1)
 
-    # Budowanie klikalnych linków dla Excela i Google Sheets
     df_export["Geoportal Link"] = df_export["LinkG"].apply(
-        lambda url: (
-            f'=HYPERLINK("{url}", "Otwórz Geoportal")'
-            if pd.notnull(url)
-            else ""
-        )
+        lambda url: f'=HYPERLINK("{url}", "Otwórz Geoportal")' if pd.notnull(url) else ""
     )
     df_export["e-Mapa Link"] = df_export["LinkE"].apply(
-        lambda url: (
-            f'=HYPERLINK("{url}", "Otwórz e-Mapę")' if pd.notnull(url) else ""
-        )
+        lambda url: f'=HYPERLINK("{url}", "Otwórz e-Mapę")' if pd.notnull(url) else ""
     )
     df_export["OnGeo Link"] = df_export["LinkO"].apply(
         lambda url: f'=HYPERLINK("{url}", "Otwórz OnGeo")' if pd.notnull(url) else ""
     )
     df_export["Nawigacja Google"] = df_export["LinkM"].apply(
-        lambda url: (
-            f'=HYPERLINK("{url}", "Nawiguj do działki")'
-            if pd.notnull(url)
-            else ""
-        )
+        lambda url: f'=HYPERLINK("{url}", "Nawiguj do działki")' if pd.notnull(url) else ""
     )
 
     kolumny_porzadek = [
-        "Pozycja",
-        "Adres",
-        "Gmina",
-        "ID",
-        "Nr",
-        "Typ",
-        "Linia",
-        "Pow",
-        "Cena",
-        "Roszczenie",
-        "Slupy",
-        "Dist",
-        "Geoportal Link",
-        "e-Mapa Link",
-        "OnGeo Link",
-        "Nawigacja Google",
+        "Pozycja", "Adres", "Gmina", "ID", "Nr", "Typ", "Linia", "Pow", "Cena", 
+        "Roszczenie", "Slupy", "Dist", "Geoportal Link", "e-Mapa Link", "OnGeo Link", "Nawigacja Google"
     ]
-
     kolumny_finalne = [k for k in kolumny_porzadek if k in df_export.columns]
     df_final = df_export[kolumny_finalne]
-
-    # Zapis pliku xlsx
     df_final.to_excel(plik_wyjsciowy, index=False, engine="openpyxl")
     return plik_wyjsciowy
-
 
 init_db()
 
 # ==============================================================================
-# 3. SILNIK GIS Z TIMEOUTAMI I OBŁUGĄ SIECI
+# 4. SILNIK GIS Z POMOCNIKAMI ZAPYTAŃ NETWORK
 # ==============================================================================
-transformer_4326_to_2177 = Transformer.from_crs(
-    "EPSG:4326", "EPSG:2177", always_xy=True
-)
-transformer_2177_to_4326 = Transformer.from_crs(
-    "EPSG:2177", "EPSG:4326", always_xy=True
-)
-
+transformer_4326_to_2177 = Transformer.from_crs("EPSG:4326", "EPSG:2177", always_xy=True)
+transformer_2177_to_4326 = Transformer.from_crs("EPSG:2177", "EPSG:4326", always_xy=True)
 
 def geokoduj_wpis_startowy(tekst_wpisu):
     if not tekst_wpisu or not tekst_wpisu.strip():
@@ -195,55 +190,32 @@ def geokoduj_wpis_startowy(tekst_wpisu):
     tekst = tekst_wpisu.strip()
     match = re.search(r"(-?\d+\.\d+)[\s,]+(-?\d+\.\d+)", tekst)
     if match:
-        return (
-            float(match.group(1)),
-            float(match.group(2)),
-            f"GPS ({float(match.group(1)):.4f}, {float(match.group(2)):.4f})",
-        )
+        return float(match.group(1)), float(match.group(2)), f"GPS ({float(match.group(1)):.4f}, {float(match.group(2)):.4f})"
     try:
         url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(tekst)}&format=json&limit=1"
-        r = requests.get(
-            url, headers={"User-Agent": "PrzeSmykApp/11.0"}, timeout=5
-        )
+        r = requests.get(url, headers={"User-Agent": "PrzeSmykApp/12.0"}, timeout=5)
         if r.status_code == 200 and len(r.json()) > 0:
             res = r.json()[0]
-            return (
-                float(res["lat"]),
-                float(res["lon"]),
-                res.get("display_name", tekst).split(",")[0],
-            )
+            return float(res["lat"]), float(res["lon"]), res.get("display_name", tekst).split(",")[0]
     except Exception:
         pass
     return 50.0931, 19.9525, "Kraków (Domyślnie)"
 
-
 def pobierz_adres_i_filtr_zabudowy(lat, lon, nr_dzialki_ewidencja):
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1&extratags=1"
-        r = requests.get(
-            url, headers={"User-Agent": "PrzeSmykApp/11.0"}, timeout=5
-        )
+        r = requests.get(url, headers={"User-Agent": "PrzeSmykApp/12.0"}, timeout=5)
         if r.status_code == 200:
             data = r.json()
             raw_text = str(data).lower()
 
             if any(s in raw_text for s in CZARNA_LISTA):
                 return "", False, "Osiedle / Bloki"
-            if data.get("extratags", {}).get("building") in [
-                "apartments",
-                "residential",
-                "dormitory",
-                "terrace",
-            ]:
+            if data.get("extratags", {}).get("building") in ["apartments", "residential", "dormitory", "terrace"]:
                 return "", False, "Wielorodzinny"
 
             addr = data.get("address", {})
-            miasto = (
-                addr.get("city")
-                or addr.get("town")
-                or addr.get("village")
-                or "Kraków"
-            )
+            miasto = addr.get("city") or addr.get("town") or addr.get("village") or "Kraków"
             ulica = addr.get("road") or ""
             numer = addr.get("house_number") or ""
 
@@ -253,16 +225,12 @@ def pobierz_adres_i_filtr_zabudowy(lat, lon, nr_dzialki_ewidencja):
                 else f"{miasto}, dz. nr {nr_dzialki_ewidencja}"
             )
 
-            if any(
-                b in raw_text
-                for b in ["commercial", "industrial", "warehouse", "company"]
-            ):
+            if any(b in raw_text for b in ["commercial", "industrial", "warehouse", "company"]):
                 return adres_czysty, True, "🏭 Firma / Przemysł"
             return adres_czysty, True, "🏠 Dom Jednorodzinny / Posesja"
     except Exception:
         pass
     return f"Kraków, dz. nr {nr_dzialki_ewidencja}", True, "🏠 Posesja"
-
 
 def uldk_pobierz_dzialke_z_geometria(x_2177, y_2177):
     url = f"https://uldk.gugik.gov.pl/request.php?request=GetParcelByXY&xy={x_2177},{y_2177},2177&result=id,commune,parcel,geom_wkt"
@@ -289,257 +257,228 @@ def uldk_pobierz_dzialke_z_geometria(x_2177, y_2177):
         pass
     return None
 
-
 def szacuj_cene_m2_avm(odleglosc_dom_km):
     return max(180.0, 600.0 - (odleglosc_dom_km * 8.0))
 
+# ==============================================================================
+# 5. WĄTEK PRACY W TLE (BACKGROUND WORKER)
+# ==============================================================================
+def worker_przelicz_trase(current_lat, current_lon):
+    try:
+        set_job_status("RUNNING", "Skanowanie linii przesyłowych i granic działek w głąb powiatów...")
+        
+        sieci, slupy = pobierz_i_zaladuj_dane_gis()
+        
+        dom_x, dom_y = transformer_4326_to_2177.transform(current_lon, current_lat)
+        punkt_dom = Point(dom_x, dom_y)
+        odwiedzone_ids = get_visited_ids()
+
+        sieci_work = sieci.copy()
+        sieci_work["dist"] = sieci_work.geometry.distance(punkt_dom) / 1000.0
+        sieci_work = sieci_work.sort_values(by="dist", ascending=True)
+
+        TARGET_COUNT = 100
+        wykryte_dzialki = {}
+        PROMIENIE = [5000.0, 15000.0, 30000.0, 50000.0]
+
+        for promien in PROMIENIE:
+            if len(wykryte_dzialki) >= TARGET_COUNT:
+                break
+
+            bufor_obszaru = punkt_dom.buffer(promien)
+            sieci_w_promieniu = sieci_work[sieci_work.geometry.intersects(bufor_obszaru)].copy()
+
+            for idx, linia in sieci_w_promieniu.iterrows():
+                if len(wykryte_dzialki) >= TARGET_COUNT:
+                    break
+
+                opis_nap = str(linia.get("napiecie", linia.get("rodzaj", "110 kV"))).upper()
+                szerokosc_strefy = 15.0
+                for k, v in STREFY_SLUZEBNOSCI.items():
+                    if k in opis_nap.lower():
+                        szerokosc_strefy = v
+                        break
+
+                dlugosc = linia.geometry.length
+                for d in range(0, int(dlugosc), 120):
+                    if len(wykryte_dzialki) >= TARGET_COUNT:
+                        break
+
+                    pt = linia.geometry.interpolate(d)
+                    dzialka = uldk_pobierz_dzialke_z_geometria(pt.x, pt.y)
+                    if dzialka:
+                        id_d = dzialka["id_dzialki"]
+                        if id_d in odwiedzone_ids or id_d in wykryte_dzialki:
+                            continue
+
+                        poly = dzialka.get("geom")
+                        if poly and not poly.is_empty:
+                            rdzen_dzialki = poly.buffer(-2.5)
+                            if rdzen_dzialki.is_empty or not rdzen_dzialki.intersects(linia.geometry):
+                                continue
+
+                        lon_wgs, lat_wgs = transformer_2177_to_4326.transform(pt.x, pt.y)
+                        adres_czysty, ok, typ_terenu = pobierz_adres_i_filtr_zabudowy(lat_wgs, lon_wgs, dzialka["nr_dzialki"])
+
+                        if not ok:
+                            continue
+
+                        dzialka.update({
+                            "szer_pasa": szerokosc_strefy,
+                            "rodzaj": opis_nap,
+                            "adres": adres_czysty,
+                            "typ": typ_terenu,
+                            "lat": lat_wgs,
+                            "lon": lon_wgs,
+                            "dist": linia["dist"],
+                        })
+                        wykryte_dzialki[id_d] = dzialka
+                        set_job_status("RUNNING", f"Znaleziono {len(wykryte_dzialki)}/100 spełniających kryteria działek...", len(wykryte_dzialki))
+                        time.sleep(0.01)
+
+        lista_rankingowa = []
+        for id_d, d in wykryte_dzialki.items():
+            ilosc_slupow = (
+                len(slupy[slupy.geometry.intersects(Point(d["x"], d["y"]).buffer(30.0))])
+                if not slupy.empty else 0
+            )
+            cena = szacuj_cene_m2_avm(d["dist"])
+            pow_pasa = 85.0 * d["szer_pasa"]
+            roszczenie = pow_pasa * cena * WSPOLCZYNNIK_WSPOLKORZYSTANIA
+
+            link_geo = f"https://mapy.geoportal.gov.pl/imap/Imgp_2.html?identifyParcel={id_d}"
+            link_ema = f"https://polska.e-mapa.net/?dzialka={id_d}"
+            link_ong = f"https://ongeo.pl/mapa?x={d['lon']:.6f}&y={d['lat']:.6f}&zoom=19"
+            link_gmaps = f"https://www.google.com/maps?q={d['lat']},{d['lon']}"
+
+            rodzaj_mediow = "🔥 Gazociąg" if "GAZ" in d["rodzaj"] else "⚡ Linia Elektroenergetyczna"
+
+            lista_rankingowa.append({
+                "ID": id_d,
+                "Adres": d["adres"],
+                "Gmina": d["gmina"],
+                "Nr": d["nr_dzialki"],
+                "Typ": d["typ"],
+                "Linia": f"{rodzaj_mediow} ({d['rodzaj']})",
+                "Pow": pow_pasa,
+                "Cena": cena,
+                "Roszczenie": round(roszczenie, 2),
+                "Slupy": ilosc_slupow,
+                "Dist": round(d["dist"], 2),
+                "LinkG": link_geo,
+                "LinkE": link_ema,
+                "LinkO": link_ong,
+                "LinkM": link_gmaps,
+            })
+
+        df = pd.DataFrame(lista_rankingowa)
+        if not df.empty:
+            df = df.sort_values(by=["Roszczenie", "Dist"], ascending=[False, True]).reset_index(drop=True)
+            generuj_i_zapisz_excel(df, PLIK_WYNIKOWY)
+            set_job_status("COMPLETED", f"Pomyślnie wygenerowano marszrutę dla {len(df)} działek!", len(df))
+        else:
+            set_job_status("ERROR", "Brak działek spełniających kryteria w wybranym obszarze.")
+
+    except Exception as e:
+        set_job_status("ERROR", f"Błąd podczas pracy w tle: {str(e)}")
 
 # ==============================================================================
-# 4. INTERFEJS UŻYTKOWNIKA
+# 6. INTERFEJS UŻYTKOWNIKA STREAMLIT
 # ==============================================================================
-st.sidebar.title("🚙⚡🔥 PrzeSmyk v2.8")
-st.sidebar.caption("Centrum Dowodzenia Terenowego")
+st.sidebar.title("🚙⚡🔥 PrzeSmyk v2.9")
+st.sidebar.caption("Ranking służebności i planowanie trasy")
 st.sidebar.markdown("---")
 
 st.sidebar.subheader("📍 Start Marszruty")
 wpis_lokalizacji = st.sidebar.text_input(
-    "Wpisz z palca miasto, ulicę lub numer domu:",
+    "Wpisz adres startowy:",
     value="Kraków, ul. Nad Sudołem 32",
 )
-current_lat, current_lon, opis_lokalizacji = geokoduj_wpis_startowy(
-    wpis_lokalizacji
-)
+current_lat, current_lon, opis_lokalizacji = geokoduj_wpis_startowy(wpis_lokalizacji)
 st.sidebar.caption(f"🎯 Zlokalizowano: **{opis_lokalizacji}**")
 
-przelicz_button = st.sidebar.button("🚙 PRZELICZ TRASĘ", type="primary")
+przelicz_button = st.sidebar.button("🚙 PRZELICZ TRASĘ W TLE", type="primary")
 
 tab1, tab2, tab3 = st.tabs(
     ["🗺️ Trasa & Operat", "📝 CRM Terenowy", "🗂️ Baza Działek"]
 )
 
+# REAKCJA NA KLIKNIĘCIE - START WĄTKU TŁA
 if przelicz_button:
-    try:
-        with st.spinner(
-            "⏳ Trwa skanowanie obszaru przesyłowego, filtrowanie i generowanie marszruty..."
-        ):
-            pobierz_plik_jesli_brak(URL_SIECI, PLIK_SIECI)
-            pobierz_plik_jesli_brak(URL_SLUPY, PLIK_SLUPY)
-
-            dom_x, dom_y = transformer_4326_to_2177.transform(
-                current_lon, current_lat
-            )
-            punkt_dom = Point(dom_x, dom_y)
-            odwiedzone_ids = get_visited_ids()
-
-            sieci = gpd.read_file(PLIK_SIECI).to_crs("EPSG:2177")
-            slupy = (
-                gpd.read_file(PLIK_SLUPY).to_crs("EPSG:2177")
-                if os.path.exists(PLIK_SLUPY)
-                else gpd.GeoDataFrame()
-            )
-
-            sieci["dist"] = sieci.geometry.distance(punkt_dom) / 1000.0
-            sieci = sieci.sort_values(by="dist", ascending=True)
-
-            TARGET_COUNT = 100
-            wykryte_dzialki = {}
-
-            # PROMIENIE AUTOMATYCZNEGO ROZSZERZANIA (5 km -> 15 km -> 30 km -> 50 km)
-            PROMIENIE = [5000.0, 15000.0, 30000.0, 50000.0]
-
-            for promien in PROMIENIE:
-                if len(wykryte_dzialki) >= TARGET_COUNT:
-                    break
-
-                bufor_obszaru = punkt_dom.buffer(promien)
-                sieci_w_promieniu = sieci[
-                    sieci.geometry.intersects(bufor_obszaru)
-                ].copy()
-
-                for idx, linia in sieci_w_promieniu.iterrows():
-                    if len(wykryte_dzialki) >= TARGET_COUNT:
-                        break
-
-                    opis_nap = str(
-                        linia.get("napiecie", linia.get("rodzaj", "110 kV"))
-                    ).upper()
-                    szerokosc_strefy = 15.0
-                    for k, v in STREFY_SLUZEBNOSCI.items():
-                        if k in opis_nap.lower():
-                            szerokosc_strefy = v
-                            break
-
-                    dlugosc = linia.geometry.length
-                    for d in range(0, int(dlugosc), 120):
-                        if len(wykryte_dzialki) >= TARGET_COUNT:
-                            break
-
-                        pt = linia.geometry.interpolate(d)
-                        dzialka = uldk_pobierz_dzialke_z_geometria(pt.x, pt.y)
-                        if dzialka:
-                            id_d = dzialka["id_dzialki"]
-                            if (
-                                id_d in odwiedzone_ids
-                                or id_d in wykryte_dzialki
-                            ):
-                                continue
-
-                            # BUFOR 2.5 METRA DLA ODLEGŁOŚCI OD GRANICY DZIAŁKI
-                            poly = dzialka.get("geom")
-                            if poly and not poly.is_empty:
-                                rdzen_dzialki = poly.buffer(-2.5)
-                                if (
-                                    rdzen_dzialki.is_empty
-                                    or not rdzen_dzialki.intersects(
-                                        linia.geometry
-                                    )
-                                ):
-                                    continue
-
-                            lon_wgs, lat_wgs = (
-                                transformer_2177_to_4326.transform(pt.x, pt.y)
-                            )
-                            adres_czysty, ok, typ_terenu = (
-                                pobierz_adres_i_filtr_zabudowy(
-                                    lat_wgs, lon_wgs, dzialka["nr_dzialki"]
-                                )
-                            )
-
-                            if not ok:
-                                continue
-
-                            dzialka.update({
-                                "szer_pasa": szerokosc_strefy,
-                                "rodzaj": opis_nap,
-                                "adres": adres_czysty,
-                                "typ": typ_terenu,
-                                "lat": lat_wgs,
-                                "lon": lon_wgs,
-                                "dist": linia["dist"],
-                            })
-                            wykryte_dzialki[id_d] = dzialka
-                            time.sleep(0.01)
-
-            lista_rankingowa = []
-            for id_d, d in wykryte_dzialki.items():
-                ilosc_slupow = (
-                    len(
-                        slupy[
-                            slupy.geometry.intersects(
-                                Point(d["x"], d["y"]).buffer(30.0)
-                            )
-                        ]
-                    )
-                    if not slupy.empty
-                    else 0
-                )
-                cena = szacuj_cene_m2_avm(d["dist"])
-                pow_pasa = 85.0 * d["szer_pasa"]
-                roszczenie = pow_pasa * cena * WSPOLCZYNNIK_WSPOLKORZYSTANIA
-
-                link_geo = f"https://mapy.geoportal.gov.pl/imap/Imgp_2.html?identifyParcel={id_d}"
-                link_ema = f"https://polska.e-mapa.net/?dzialka={id_d}"
-                link_ong = f"https://ongeo.pl/mapa?x={d['lon']:.6f}&y={d['lat']:.6f}&zoom=19"
-                link_gmaps = f"https://www.google.com/maps?q={d['lat']},{d['lon']}"
-
-                rodzaj_mediow = (
-                    "🔥 Gazociąg"
-                    if "GAZ" in d["rodzaj"]
-                    else "⚡ Linia Elektroenergetyczna"
-                )
-
-                lista_rankingowa.append({
-                    "ID": id_d,
-                    "Adres": d["adres"],
-                    "Gmina": d["gmina"],
-                    "Nr": d["nr_dzialki"],
-                    "Typ": d["typ"],
-                    "Linia": f"{rodzaj_mediow} ({d['rodzaj']})",
-                    "Pow": pow_pasa,
-                    "Cena": cena,
-                    "Roszczenie": round(roszczenie, 2),
-                    "Slupy": ilosc_slupow,
-                    "Dist": round(d["dist"], 2),
-                    "LinkG": link_geo,
-                    "LinkE": link_ema,
-                    "LinkO": link_ong,
-                    "LinkM": link_gmaps,
-                })
-
-            df = pd.DataFrame(lista_rankingowa)
-            if not df.empty:
-                df = df.sort_values(
-                    by=["Roszczenie", "Dist"], ascending=[False, True]
-                ).reset_index(drop=True)
-                st.session_state["rank"] = df
-
-                # Automatyczny zapis do arkusza Excel
-                generuj_i_zapisz_excel(df, PLIK_WYNIKOWY)
-                st.success(
-                    f"✅ Wygenerowano marszrutę ({len(df)} działek)! Zapisano raport w pliku `{PLIK_WYNIKOWY}`."
-                )
-            else:
-                st.warning(
-                    "Nie znaleziono działek spełniających kryteria w badanym obszarze."
-                )
-
-    except Exception as e:
-        st.error(f"Wystąpił błąd podczas obliczeń: {e}")
+    job = get_job_status()
+    if job.get("status") == "RUNNING":
+        st.sidebar.warning("⏳ Analiza w tle już trwa!")
+    else:
+        set_job_status("RUNNING", "Inicjalizacja wątku analizy w tle...")
+        t = threading.Thread(target=worker_przelicz_trase, args=(current_lat, current_lon))
+        t.daemon = True
+        t.start()
+        st.sidebar.success("🚀 Uruchomiono analizę w tle! Możesz zamknąć przeglądarkę.")
 
 with tab1:
-    if "rank" in st.session_state:
-        df_rank = st.session_state["rank"]
-        st.subheader(f"📍 Marszruta Terenowa: {len(df_rank)} działek")
+    job = get_job_status()
+    
+    # SYSTEM STATUSU ZADANIA W TLE
+    if job.get("status") == "RUNNING":
+        st.info(f"⏳ **Trwa analiza w tle na serwerze...**\n\n*Status:* {job.get('message')}\n\n*Ostatnia aktualizacja:* {job.get('updated_at')}\n\n💡 **Możesz bezpiecznie wyłączyć iPada i zamknąć stronę.** Serwer dokończy obliczenia, a wynikowy plik Excel będzie czekał po ponownym otwarciu strony.")
+        if st.button("🔄 Odśwież status"):
+            st.rerun()
 
-        # Przycisk pobierania pliku Excel z poziomu iPada
-        if os.path.exists(PLIK_WYNIKOWY):
-            with open(PLIK_WYNIKOWY, "rb") as f:
-                st.download_button(
-                    label="📊 Pobierz pełny raport (.XLSX) dla Google Sheets / MS Excel",
-                    data=f.read(),
-                    file_name=PLIK_WYNIKOWY,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                )
-            st.markdown("---")
+    elif job.get("status") == "COMPLETED" or os.path.exists(PLIK_WYNIKOWY):
+        st.success(f"🎉 **Gotowe!** Raport został wygenerowany ({job.get('updated_at')}).")
+        
+        # PRZYCISK POBIERANIA EXCELA DLA IPADA
+        with open(PLIK_WYNIKOWY, "rb") as f:
+            st.download_button(
+                label="📊 Pobierz pełny raport (.XLSX) dla Google Sheets / MS Excel",
+                data=f.read(),
+                file_name=PLIK_WYNIKOWY,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary"
+            )
+        st.markdown("---")
 
-        for idx, row in df_rank.iterrows():
-            st.markdown(f"### {idx+1}. {row['Adres']}")
-            c1, c2, c3 = st.columns([3, 3, 3])
-            c1.markdown(
-                f"📍 **Gmina:** {row['Gmina']}\n🆔 **ID Działki:** `{row['ID']}`\n{row['Typ']}"
-            )
-            c2.markdown(
-                f"💰 **Roszczenie:** `{row['Roszczenie']:,.2f} PLN`\n🗼 **Wieża / Słup:** `{row['Slupy']} szt.`\n📐 **Pas:** `{row['Pow']} m²`"
-            )
-            c3.markdown(
-                f"🌐 **Weryfikacja Geodezyjna:**\n• [Otwórz Działkę - Geoportal]({row['LinkG']})\n• [Otwórz Działkę - e-Mapa]({row['LinkE']})\n• [Otwórz Mapę - OnGeo.pl]({row['LinkO']})"
-            )
+        # Odczyt wyników z wygenerowanego pliku Excel
+        try:
+            df_rank = pd.read_excel(PLIK_WYNIKOWY)
+            st.subheader(f"📍 Wygenerowana Marszruta Terenowa ({len(df_rank)} działek)")
 
-            b1, b2, b3 = st.columns([3, 3, 3])
-            with b1.popover("📄 Pobierz Raport"):
-                st.write(
-                    f"ID: {row['ID']}\nAdres: {row['Adres']}\nKwalifikacja: {row['Typ']}"
+            for idx, row in df_rank.iterrows():
+                st.markdown(f"### {idx+1}. {row['Adres']}")
+                c1, c2, c3 = st.columns([3, 3, 3])
+                c1.markdown(
+                    f"📍 **Gmina:** {row['Gmina']}\n🆔 **ID Działki:** `{row['ID']}`\n{row['Typ']}"
                 )
-                st.download_button(
-                    "💾 Pobierz Plik",
-                    f"ID: {row['ID']}\nAdres: {row['Adres']}",
-                    file_name=f"Raport_{row['Nr']}.txt",
+                c2.markdown(
+                    f"💰 **Roszczenie:** `{row['Roszczenie']:,.2f} PLN`\n🗼 **Wieża / Słup:** `{row['Slupy']} szt.`\n📐 **Pas:** `{row['Pow']} m²`"
                 )
-            with b2.popover("📊 Kalkulator Roszczeń"):
-                st.write(
-                    f"**Infrastruktura:** {row['Linia']}\n**Wzór:** `{row['Pow']} m² × {row['Cena']} PLN × 0.5`\n### Wartość: {row['Roszczenie']:,.2f} PLN"
+                
+                # Wyciąganie linków z tekstu lub bezpośrednich kolumn
+                link_g = f"https://mapy.geoportal.gov.pl/imap/Imgp_2.html?identifyParcel={row['ID']}"
+                link_e = f"https://polska.e-mapa.net/?dzialka={row['ID']}"
+                
+                c3.markdown(
+                    f"🌐 **Weryfikacja Geodezyjna:**\n• [Otwórz Działkę - Geoportal]({link_g})\n• [Otwórz Działkę - e-Mapa]({link_e})"
                 )
-            b3.link_button(
-                "🚗 Nawiguj (Google Maps)", row["LinkM"], type="primary"
-            )
-            st.divider()
+
+                b1, b2 = st.columns([3, 3])
+                with b1.popover("📄 Szybki podgląd"):
+                    st.write(f"ID: {row['ID']}\nAdres: {row['Adres']}\nKwalifikacja: {row['Typ']}")
+                with b2.popover("📊 Kalkulator"):
+                    st.write(f"**Infrastruktura:** {row['Linia']}\n### Wartość: {row['Roszczenie']:,.2f} PLN")
+                st.divider()
+        except Exception as e:
+            st.error(f"Błąd odczytu pliku wyników: {e}")
+
+    elif job.get("status") == "ERROR":
+        st.error(f"❌ Wystąpił błąd podczas analizy: {job.get('message')}")
+    else:
+        st.info("Wpisz adres startowy w panelu po lewej stronie i kliknij **'🚙 PRZELICZ TRASĘ W TLE'**.")
 
 with tab2:
     with st.form("crm"):
         tid = st.text_input("ID Działki")
-        stat = st.selectbox(
-            "Status Wizyty", ["Odwiedzona", "Umówione spotkanie", "Odmowa"]
-        )
+        stat = st.selectbox("Status Wizyty", ["Odwiedzona", "Umówione spotkanie", "Odmowa"])
         kw = st.text_input("Numer KW")
         wlas = st.text_input("Dane Kontaktowe Właściciela")
         notat = st.text_area("Notatka z rozmowy")
