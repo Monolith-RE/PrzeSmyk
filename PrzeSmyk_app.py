@@ -12,7 +12,7 @@ from pyproj import Transformer
 import time
 
 # ==============================================================================
-# 1. KONFIGURACJA PROJEKTU "PrzeSmyk"
+# 1. KONFIGURACJA PROJEKTU "PrzeSmyk" (ZESTAW A: 🚙⚡🔥)
 # ==============================================================================
 DB_NAME = "PrzeSmyk_crm.db"
 PLIK_SIECI = "sieci_komplet.gpkg"
@@ -22,7 +22,12 @@ PLIK_WYNIKOWY = "PrzeSmyk_Ranking.xlsx"
 URL_SIECI = "https://github.com/Monolith-RE/PrzeSmyk/releases/download/v1.0/sieci_komplet.gpkg"
 URL_SLUPY = "https://github.com/Monolith-RE/PrzeSmyk/releases/download/v1.0/slupy_komplet.gpkg"
 
-st.set_page_config(page_title="PrzeSmyk: Sprytny Planer Służebności Przesyłu", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="PrzeSmyk: Sprytny Planer Służebności Przesyłu",
+    page_icon="🚙",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 STREFY_SLUZEBNOSCI = {'400kv': 30.0, '220kv': 25.0, '110kv': 20.0, 'wysokie': 20.0, 'najwyższe': 30.0, 'domyslna': 15.0}
 WSPOLCZYNNIK_WSPOLKORZYSTANIA = 0.5
@@ -64,7 +69,7 @@ def pobierz_plik_jesli_brak(url, nazwa_pliku):
 init_db()
 
 # ==============================================================================
-# 3. SILNIK GIS Z SKANOWANIEM DYNAMICZNYM DLA 7 POWIATÓW
+# 3. SILNIK GIS Z SKANOWANIEM DYNAMICZNYM
 # ==============================================================================
 transformer_4326_to_2177 = Transformer.from_crs("EPSG:4326", "EPSG:2177", always_xy=True)
 transformer_2177_to_4326 = Transformer.from_crs("EPSG:2177", "EPSG:4326", always_xy=True)
@@ -76,7 +81,7 @@ def geokoduj_wpis_startowy(tekst_wpisu):
     if match: return float(match.group(1)), float(match.group(2)), f"GPS ({float(match.group(1)):.4f}, {float(match.group(2)):.4f})"
     try:
         url = f"https://nominatim.openstreetmap.org/search?q={requests.utils.quote(tekst)}&format=json&limit=1"
-        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/7.0'}, timeout=3)
+        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/8.0'}, timeout=3)
         if r.status_code == 200 and len(r.json()) > 0:
             res = r.json()[0]
             return float(res['lat']), float(res['lon']), res.get('display_name', tekst).split(',')[0]
@@ -86,7 +91,7 @@ def geokoduj_wpis_startowy(tekst_wpisu):
 def pobierz_adres_i_filtr_zabudowy(lat, lon, nr_dzialki_ewidencja):
     try:
         url = f"https://nominatim.openstreetmap.org/reverse?format=json&lat={lat}&lon={lon}&zoom=18&addressdetails=1&extratags=1"
-        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/7.0'}, timeout=2)
+        r = requests.get(url, headers={'User-Agent': 'PrzeSmykApp/8.0'}, timeout=2)
         if r.status_code == 200:
             data = r.json()
             raw_text = str(data).lower()
@@ -103,10 +108,10 @@ def pobierz_adres_i_filtr_zabudowy(lat, lon, nr_dzialki_ewidencja):
             adres_czysty = f"{miasto}, ul. {ulica} {numer}".strip() if ulica and numer else f"{miasto}, dz. nr {nr_dzialki_ewidencja}"
             
             if any(b in raw_text for b in ['commercial', 'industrial', 'warehouse', 'company']):
-                return adres_czysty, True, "Firma / Przemysł"
-            return adres_czysty, True, "Dom Jednorodzinny / Posesja"
+                return adres_czysty, True, "🏭 Firma / Przemysł"
+            return adres_czysty, True, "🏠 Dom Jednorodzinny / Posesja"
     except Exception: pass
-    return f"Kraków, dz. nr {nr_dzialki_ewidencja}", True, "Posesja"
+    return f"Kraków, dz. nr {nr_dzialki_ewidencja}", True, "🏠 Posesja"
 
 def uldk_pobierz_dzialke_z_geometria(x_2177, y_2177):
     url = f"https://uldk.gugik.gov.pl/request.php?request=GetParcelByXY&xy={x_2177},{y_2177},2177&result=id,commune,parcel,geom_wkt"
@@ -129,9 +134,9 @@ def szacuj_cene_m2_avm(odleglosc_dom_km):
     return max(180.0, 600.0 - (odleglosc_dom_km * 8.0))
 
 # ==============================================================================
-# 4. INTERFEJS UŻYTKOWNIKA
+# 4. INTERFEJS UŻYTKOWNIKA (JEPI, ENERGIA, GAZ)
 # ==============================================================================
-st.sidebar.title("⚡ PrzeSmyk v2.3")
+st.sidebar.title("🚙⚡🔥 PrzeSmyk v2.4")
 st.sidebar.caption("Centrum Dowodzenia Terenowego")
 st.sidebar.markdown("---")
 
@@ -140,17 +145,17 @@ wpis_lokalizacji = st.sidebar.text_input("Wpisz z palca miasto, ulicę lub numer
 current_lat, current_lon, opis_lokalizacji = geokoduj_wpis_startowy(wpis_lokalizacji)
 st.sidebar.caption(f"🎯 Zlokalizowano: **{opis_lokalizacji}**")
 
-przelicz_button = st.sidebar.button("🚗 PRZELICZ TRASĘ NA DZIŚ", type="primary")
+przelicz_button = st.sidebar.button("🚙 PRZELICZ TRASĘ", type="primary")
 
-st.title("⚡ PrzeSmyk: Sprytny Planer Służebności Przesyłu")
+st.title("🚙⚡🔥 PrzeSmyk: Sprytny Planer Służebności Przesyłu")
 
-tab1, tab2, tab3 = st.tabs(["🗺️ Ranking & Nawigacja", "📝 CRM", "📋 Baza Wpisów"])
+tab1, tab2, tab3 = st.tabs(["🗺️ Trasa & Operat", "📝 CRM Terenowy", "🗂️ Baza Działek"])
 
 if przelicz_button:
     pobierz_plik_jesli_brak(URL_SIECI, PLIK_SIECI)
     pobierz_plik_jesli_brak(URL_SLUPY, PLIK_SLUPY)
     
-    with st.spinner("Skanuję linie przesyłowe w całym obszarze (odrzucam bloki oraz działki z liniami <5m od granicy)..."):
+    with st.spinner("Skanuję linie przesyłowe w obszarze 7 powiatów (odrzucam bloki oraz linie <5m od granicy)..."):
         dom_x, dom_y = transformer_4326_to_2177.transform(current_lon, current_lat)
         punkt_dom = Point(dom_x, dom_y)
         odwiedzone_ids = get_visited_ids()
@@ -161,10 +166,9 @@ if przelicz_button:
         sieci['dist'] = sieci.geometry.distance(punkt_dom) / 1000.0
         sieci = sieci.sort_values(by='dist', ascending=True)
         
-        TARGET_COUNT = 15  # Cel: Znalezienie min. 15 prawidłowych domów/firm
+        TARGET_COUNT = 15
         wykryte_dzialki = {}
         
-        # Pętla bez sztywnego stopu head(40) - skanuje linie w promieniu 7 powiatów do skutku!
         for idx, linia in sieci.iterrows():
             if len(wykryte_dzialki) >= TARGET_COUNT:
                 break
@@ -185,17 +189,15 @@ if przelicz_button:
                     id_d = dzialka['id_dzialki']
                     if id_d in odwiedzone_ids or id_d in wykryte_dzialki: continue
                     
-                    # 1. FILTR > 5 METRÓW OD GRANICY DZIAŁKI
                     poly = dzialka.get('geom')
                     if poly and not poly.is_empty:
                         rdzen_dzialki = poly.buffer(-5.0)
                         if rdzen_dzialki.is_empty or not rdzen_dzialki.intersects(linia.geometry):
-                            continue  # Linia zbiega za blisko granicy (<5m) - pomijamy
+                            continue
                     
                     lon_wgs, lat_wgs = transformer_2177_to_4326.transform(pt.x, pt.y)
                     adres_czysty, ok, typ_terenu = pobierz_adres_i_filtr_zabudowy(lat_wgs, lon_wgs, dzialka['nr_dzialki'])
                     
-                    # 2. FILTR ZABUDOWY WIELORODZINNEJ (BLOKÓW)
                     if not ok: continue
                         
                     dzialka.update({
@@ -217,9 +219,12 @@ if przelicz_button:
             link_ong = f"https://ongeo.pl/mapa?x={d['lon']:.6f}&y={d['lat']:.6f}&zoom=19"
             link_gmaps = f"https://www.google.com/maps?q={d['lat']},{d['lon']}"
             
+            # Weryfikacja mediów: Elektryczność vs Gaz
+            rodzaj_mediow = "🔥 Gazociąg" if "GAZ" in d['rodzaj'] else "⚡ Linia Elektroenergetyczna"
+            
             lista_rankingowa.append({
                 'ID': id_d, 'Adres': d['adres'], 'Gmina': d['gmina'], 'Nr': d['nr_dzialki'], 'Typ': d['typ'],
-                'Linia': d['rodzaj'], 'Pow': pow_pasa, 'Cena': cena, 'Roszczenie': round(roszczenie, 2),
+                'Linia': f"{rodzaj_mediow} ({d['rodzaj']})", 'Pow': pow_pasa, 'Cena': cena, 'Roszczenie': round(roszczenie, 2),
                 'Slupy': ilosc_slupow, 'LinkG': link_geo, 'LinkE': link_ema, 'LinkO': link_ong, 'LinkM': link_gmaps
             })
             
@@ -235,29 +240,29 @@ with tab1:
         for idx, row in st.session_state['rank'].head(15).iterrows():
             st.markdown(f"### {idx+1}. {row['Adres']}")
             c1, c2, c3 = st.columns([3, 3, 3])
-            c1.markdown(f"📍 **Gmina:** {row['Gmina']}\n🆔 **ID:** `{row['ID']}`\n🏠 **Kwalifikacja:** {row['Typ']}")
-            c2.markdown(f"💰 **Roszczenie:** `{row['Roszczenie']:,.2f} PLN`\n⚡ **Słupy:** `{row['Slupy']} szt.`\n📐 **Pas:** `{row['Pow']} m²`")
+            c1.markdown(f"📍 **Gmina:** {row['Gmina']}\n🆔 **ID Działki:** `{row['ID']}`\n{row['Typ']}")
+            c2.markdown(f"💰 **Roszczenie:** `{row['Roszczenie']:,.2f} PLN`\n🗼 **Wieża / Słup:** `{row['Slupy']} szt.`\n📐 **Pas:** `{row['Pow']} m²`")
             c3.markdown(f"🌐 **Weryfikacja Geodezyjna:**\n• [Otwórz Działkę - Geoportal]({row['LinkG']})\n• [Otwórz Działkę - e-Mapa]({row['LinkE']})\n• [Otwórz Mapę - OnGeo.pl]({row['LinkO']})")
             
             b1, b2, b3 = st.columns([3, 3, 3])
             with b1.popover("📄 Pobierz Raport"):
                 st.write(f"ID: {row['ID']}\nAdres: {row['Adres']}\nKwalifikacja: {row['Typ']}")
                 st.download_button("💾 Pobierz Plik", f"ID: {row['ID']}\nAdres: {row['Adres']}", file_name=f"Raport_{row['Nr']}.txt")
-            with b2.popover("📊 Kalkulator"):
-                st.write(f"**Wzór:** `{row['Pow']} m² × {row['Cena']} PLN × 0.5`\n### Wartość: {row['Roszczenie']:,.2f} PLN")
+            with b2.popover("📊 Kalkulator Roszczeń"):
+                st.write(f"**Infrastruktura:** {row['Linia']}\n**Wzór:** `{row['Pow']} m² × {row['Cena']} PLN × 0.5`\n### Wartość: {row['Roszczenie']:,.2f} PLN")
             b3.link_button("🚗 Nawiguj (Google Maps)", row['LinkM'], type="primary")
             st.divider()
 
 with tab2:
     with st.form("crm"):
         tid = st.text_input("ID Działki")
-        stat = st.selectbox("Status", ["Odwiedzona", "Umówione", "Odmowa"])
-        kw = st.text_input("KW")
-        wlas = st.text_input("Kontakt")
-        notat = st.text_area("Notatka")
-        if st.form_submit_button("💾 Zapisz"):
+        stat = st.selectbox("Status Wizyty", ["Odwiedzona", "Umówione spotkanie", "Odmowa"])
+        kw = st.text_input("Numer KW")
+        wlas = st.text_input("Dane Kontaktowe Właściciela")
+        notat = st.text_area("Notatka z rozmowy")
+        if st.form_submit_button("💾 Zapisz w CRM"):
             save_crm_record(tid, stat, kw, wlas, notat)
-            st.success("Zapisano!")
+            st.success("Zapisano rekord w bazie PrzeSmyk!")
 
 with tab3:
     st.dataframe(get_all_crm_records(), use_container_width=True)
